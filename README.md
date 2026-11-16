@@ -1,6 +1,6 @@
 # DivineCanvas
 
-A small offline-first iOS and Android reading app built with Expo and React Native. The current local preview uses a user-provided copy of the 1972 Bhagavad-gita As It Is. Its English translation is copyrighted; do not distribute it without permission.
+A small offline-first iOS and Android reading app built with Expo and React Native. The local preview uses the Hansi Gita Bhawan Trust’s Sanskrit, Hindi and English dataset. The Trust asks for attribution; confirm permission for full offline redistribution in an app with paid features before public release.
 
 ## Run locally
 
@@ -23,19 +23,13 @@ Scan the QR code using a compatible Expo Go version, or press `i` / `a` for an i
 
 ## Local book preview
 
-The EPUB and extracted data are ignored by Git. Place the original 1972 edition EPUB in `books/`, then generate the local data before starting the app:
-
-```sh
-python3 scripts/prepare_gita.py "books/Bhagavad-Gita As It Is (Original 1972 Edition).epub" src/data/gita.local.json
-```
-
-The EPUB provides Sanskrit and English, not Hindi. Its grouped translations remain grouped; commentary is not included. Extraction is tailored to this EPUB, and its results need editorial review. Confirm rights before distribution.
+The app reads `src/data/gita-trust.local.json`, the [Hansi Gita Bhawan Trust dataset](https://gitabhawan.org.in/gita/research). It contains 700 verses in Sanskrit, Hindi and English. The Trust claims copyright in its translations and allows use with attribution; confirm full offline redistribution and use in an app with paid features before public release. The source is credited in the app. The dataset is excluded from Git pending confirmation, but included in internal EAS builds. Download it from https://gitabhawan.org.in/data/gita-corpus.json into that path for local development.
 
 ## iPhone preview build
 
 The `preview` EAS profile produces a standalone internal build, not an Expo Go development build. It requires an Expo account, an Apple Developer Program membership, a unique iOS bundle identifier, and registration of the iPhone. See https://docs.expo.dev/tutorial/eas/internal-distribution-builds/.
 
-EAS uploads `src/data/gita.local.json` to Expo's build service so the book is included offline. `.easignore` excludes the original EPUB in `books/`. The current book is a personal prototype; resolve redistribution permissions before sharing the build. Do not use the EAS preview profile as-is for a public release.
+EAS uploads `src/data/gita-trust.local.json` to Expo's build service so the book is included offline. `.easignore` excludes the original EPUB in `books/`. The current book is a personal prototype; confirm redistribution permission before sharing the build. Do not use the EAS preview profile as-is for a public release.
 
 ## Chapter progress
 

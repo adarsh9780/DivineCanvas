@@ -21,7 +21,7 @@ import { isParadeeInstalled } from './speech/paradee/storage';
 import { dictionaryAvailable, downloadDictionary, lookupWord } from './dictionary';
 import type { DictionaryMeaning } from './dictionaryEngine';
 import { wordnetNotice } from './dictionaryNotice';
-import { chapters, passages, Passage } from './book';
+import { chapters, passages, Passage, migrateLegacyPassageId } from './book';
 import { CHAPTER_POSITION_PREFIX, chapterPositionKey, chapterResumeIndex, chapterReadingProgress, SAVE_POSITION_SQL } from './readingProgress';
 
 import { backgrounds, backgroundLabels, palettes, fontSizes, parseAppearance, Background, ColorTheme, ReadingFontSize, Palette } from './readingAppearance';
@@ -141,7 +141,7 @@ export default function App() {
     return () => { cancelled = true; musicPlayer.pause(); };
   }, [musicPlayer, ready, musicEnabled, appActive, screen, musicStatus.isLoaded, musicFailed, musicAttempt]);
   const [index, setIndex] = useState(0);
-  const [language, setLanguage] = useState<'en' | 'hi'>('en');
+  const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('en');
   const [saved, setSaved] = useState<Saved>({});
   const [chapterPositions, setChapterPositions] = useState<Record<number, string>>({});
   const positionWrites = useRef<Promise<void>>(Promise.resolve());
@@ -150,9 +150,9 @@ export default function App() {
   const selectionInputs = useRef(new Map<string, React.ComponentRef<typeof TextInput>>());
   const activeSelection = useRef<{passageId: string; start: number; end: number} | null>(null);
   const touchStart = useRef<{x: number; y: number; time: number; selection: {passageId: string; start: number; end: number}} | null>(null);
-  const [selectedWord, setSelectedWord] = useState<{passageId: string; language: 'en' | 'hi'; word: string} | null>(null);
+  const [selectedWord, setSelectedWord] = useState<{passageId: string; language: 'en' | 'hi' | 'sa'; word: string} | null>(null);
   const [dictionaryWord, setDictionaryWord] = useState<string | null>(null);
-  const [dictionaryLanguage, setDictionaryLanguage] = useState<'en' | 'hi'>('en');
+  const [dictionaryLanguage, setDictionaryLanguage] = useState<'en' | 'hi' | 'sa'>('en');
   const [dictionaryStatus, setDictionaryStatus] = useState<'prompt' | 'loading' | 'results' | 'error' | 'unsupported'>('prompt');
   const [dictionaryError, setDictionaryError] = useState('');
   const [meanings, setMeanings] = useState<DictionaryMeaning[]>([]);
@@ -168,6 +168,24 @@ export default function App() {
       const database = await SQLite.openDatabaseAsync('kgram.db');
       await database.execAsync('CREATE TABLE IF NOT EXISTS saves (id TEXT PRIMARY KEY NOT NULL, note TEXT NOT NULL DEFAULT ""); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);');
       db.current = database;
+      // Preserve the previous edition's bookmarks and positions using their first verse.
+      // Keep the original records intact, and only migrate once so removed saves stay removed.
+      const migration = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'gita-trust-migrated'");
+      if (!migration) {
+        const oldSaves = await database.getAllAsync<{id: string; note: string}>("SELECT id, note FROM saves WHERE id LIKE 'gita-1972:%'");
+        for (const row of oldSaves) {
+          const id = migrateLegacyPassageId(row.id);
+          if (id) await database.runAsync('INSERT OR IGNORE INTO saves (id, note) VALUES (?, ?)', id, row.note);
+        }
+        const oldPositions = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key = 'position' OR key LIKE ?", `${CHAPTER_POSITION_PREFIX}%`);
+        for (const row of oldPositions) {
+          const id = migrateLegacyPassageId(row.value);
+          if (id) await database.runAsync('UPDATE settings SET value = ? WHERE key = ?', id, row.key);
+        }
+        // The old app used 'hi' to represent Sanskrit.
+        await database.runAsync("UPDATE settings SET value = 'sa' WHERE key = 'language' AND value = 'hi'");
+        await database.runAsync("INSERT OR REPLACE INTO settings (key, value) VALUES ('gita-trust-migrated', '1')");
+      }
       const rows = await database.getAllAsync<{id: string; note: string}>('SELECT id, note FROM saves');
       setSaved(Object.fromEntries(rows.map(row => [row.id, row.note])));
       const position = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'position'");
@@ -196,7 +214,7 @@ export default function App() {
       }
       setChapterPositions(positions);
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
-      if (lang?.value === 'hi') setLanguage('hi');
+      if (lang?.value === 'hi' || lang?.value === 'sa') setLanguage(lang.value);
       const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
@@ -343,7 +361,7 @@ export default function App() {
       if (finished) { setDictionaryWord(null); dictionaryClosing.current = false; }
     });
   }
-  async function showWord(word: string, lang: 'en' | 'hi', download = false) {
+  async function showWord(word: string, lang: 'en' | 'hi' | 'sa', download = false) {
     if (dictionaryClosing.current) return;
     const request = ++dictionaryRequest.current;
     setDictionaryWord(word); setDictionaryLanguage(lang); setShowDictionaryLicense(false);
@@ -407,7 +425,7 @@ export default function App() {
     const controller=new AbortController(); speechAbort.current=controller; setNarrating(true);
     try {
       const engine=await getSpeechEngine();
-      const speechLanguage = language === 'en' ? 'en' : 'sa';
+      const speechLanguage = language;
       const voice = engine.info.voices.find(candidate => candidate.languages.includes(speechLanguage));
       if (!voice) throw new Error('No voice is available for this language.');
       const result=await engine.synthesize({text:passage[language],language:speechLanguage,voiceId:voice.id},controller.signal);
@@ -459,7 +477,7 @@ export default function App() {
         setSelectedWord(null);
       }, 0);
     }}><StatusBar style={colors.dark ? "light" : "dark"} />
-    <View style={styles.header}><Pressable accessibilityRole="button" accessibilityLabel="Open settings" accessibilityState={{expanded:settingsPage !== null}} onPress={() => setSettingsPage('menu')} style={styles.profileButton}><View accessible={false} style={styles.profileGlyph}><View style={styles.profileHead}/><View style={styles.profileShoulders}/></View></Pressable>{autoScrollEnabled && screen === 'read' && <AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/>}<View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? 'Loading reading music' : musicFailed && musicEnabled ? 'Music unavailable. Tap to retry' : musicEnabled ? 'Mute reading music' : 'Unmute reading music'} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable><Pressable accessibilityRole="button" accessibilityLabel="Switch between English translation and Sanskrit" onPress={() => { const next = language === 'en' ? 'hi' : 'en'; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? 'English ▾' : 'संस्कृत ▾'}</Text></Pressable></View></View>
+    <View style={styles.header}><Pressable accessibilityRole="button" accessibilityLabel="Open settings" accessibilityState={{expanded:settingsPage !== null}} onPress={() => setSettingsPage('menu')} style={styles.profileButton}><View accessible={false} style={styles.profileGlyph}><View style={styles.profileHead}/><View style={styles.profileShoulders}/></View></Pressable>{autoScrollEnabled && screen === 'read' && <AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/>}<View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? 'Loading reading music' : musicFailed && musicEnabled ? 'Music unavailable. Tap to retry' : musicEnabled ? 'Mute reading music' : 'Unmute reading music'} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable><Pressable accessibilityRole="button" accessibilityLabel="Switch between English, Hindi and Sanskrit" onPress={() => { const next = language === 'en' ? 'hi' : language === 'hi' ? 'sa' : 'en'; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? 'English ▾' : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable></View></View>
     <View ref={readerView} collapsable={false} style={styles.main} onLayout={e => setReaderHeight(e.nativeEvent.layout.height)}>
       {screen === 'read' && background === 'images' && activeImages.length > 0 && <View pointerEvents="none" style={styles.fixedBackground}><FilterImage source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" filters={imageFilters}/><View style={styles.backgroundScrim}/></View>}
       {screen === 'read' ? <FlatList key={`${readerHeight}-${width}`} ref={list} data={passages} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item}) => <View style={[styles.page, background === 'images' && styles.transparentPage, {height: readerHeight}]}>
@@ -525,6 +543,9 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel="App appearance" onPress={() => setSettingsPage('appearance')} style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>App appearance</Text><Text style={styles.settingsMenuDescription}>Choose the colors used throughout the app.</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
+          <View style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Bhagavad Gita source</Text><Text style={styles.settingsMenuDescription}>Hindi and English translations by Hansi Gita Bhawan Trust.</Text><Text accessibilityRole="link" onPress={() => void Linking.openURL('https://gitabhawan.org.in/gita/research')} style={[styles.settingsMenuDescription, {color:colors.accent}]}>View source and terms</Text></View>
+          </View>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading voice</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `Downloading ${Math.round(voiceDownload*100)}%` : voiceInstalled ? 'Paradee voice is available offline.' : 'Download an offline voice (about 11 MB).'}</Text></View>
             {voiceDownload !== null ? <Pressable accessibilityRole="button" accessibilityLabel="Cancel voice download" onPress={() => speechDownloadAbort.current?.abort()}><Text style={{color:colors.accent}}>Cancel</Text></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={voiceInstalled ? 'Remove reading voice' : 'Download reading voice'} onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={{color:colors.accent,fontWeight:'600'}}>{voiceInstalled ? 'Remove' : 'Download'}</Text></Pressable>}
@@ -602,7 +623,7 @@ export default function App() {
         <ScrollView contentContainerStyle={styles.dictionaryContent}>
           {dictionaryStatus === 'prompt' && <><Text style={styles.dictionaryBody}>Download the English dictionary once to look up words offline.</Text><Text style={styles.dictionaryMeta}>About 10 MB · Open English WordNet</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>Download dictionary</Text></Pressable></>}
           {dictionaryStatus === 'loading' && <View style={styles.dictionaryLoading}><ActivityIndicator color={colors.accent}/><Text style={styles.dictionaryBody}>Preparing dictionary…</Text></View>}
-          {dictionaryStatus === 'unsupported' && <Text style={styles.dictionaryBody}>{Platform.OS === 'web' ? 'Dictionary lookup is available in the mobile app.' : 'Sanskrit dictionary lookup is not available yet.'}</Text>}
+          {dictionaryStatus === 'unsupported' && <Text style={styles.dictionaryBody}>{Platform.OS === 'web' ? 'Dictionary lookup is available in the mobile app.' : dictionaryLanguage === 'hi' ? 'Hindi dictionary lookup is not available yet.' : 'Sanskrit dictionary lookup is not available yet.'}</Text>}
           {dictionaryStatus === 'error' && <><Text style={styles.dictionaryBody}>{dictionaryError}</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>Try again</Text></Pressable></>}
           {dictionaryStatus === 'results' && (meanings.length ? meanings.map(group => <View key={group.partOfSpeech} style={styles.dictionaryGroup}><Text style={styles.preferenceLabel}>{group.partOfSpeech}</Text>{group.definitions.map((definition, i) => <Text key={i} style={styles.dictionaryBody}>{i + 1}. {definition}</Text>)}</View>) : <Text style={styles.dictionaryBody}>No definition found for this word.</Text>)}
           {dictionaryLanguage === 'en' && <><Pressable accessibilityRole="button" onPress={() => setShowDictionaryLicense(value => !value)}><Text style={styles.dictionaryLink}>Dictionary source and license {showDictionaryLicense ? '▴' : '▾'}</Text></Pressable>{showDictionaryLicense && <><Text style={styles.dictionaryMeta}>Open English WordNet 2025, based on Princeton WordNet. Licensed under CC BY 4.0 and the Princeton WordNet license.</Text><Text style={styles.dictionaryMeta}>{wordnetNotice}</Text><Pressable accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/globalwordnet/english-wordnet/blob/2025-edition/LICENSE.md')}><Text style={styles.dictionaryLink}>View full license</Text></Pressable></>}</>}

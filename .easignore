@@ -46,5 +46,5 @@ yarn-error.*
 /books/
 src/data/*.local.json
 
-# Include the prepared local book data in an installable preview.
-!src/data/gita.local.json
+# Include the Trust dataset for internal previews in an installable preview.
+!src/data/gita-trust.local.json
