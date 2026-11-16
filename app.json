@@ -1,0 +1,58 @@
+{
+  "expo": {
+    "name": "DivineCanvas",
+    "slug": "divinecanvas",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/divinecanvas-icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.adarsh9780.divinecanvas",
+      "appleTeamId": "537J76G29W",
+      "buildNumber": "1"
+    },
+    "android": {
+      "predictiveBackGestureEnabled": false,
+      "package": "com.adarsh9780.divinecanvas",
+      "versionCode": 1
+    },
+    "web": {
+      "favicon": "./assets/divinecanvas-favicon.png"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-router",
+      "expo-splash-screen",
+      "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose images for your reading backgrounds.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": false
+        }
+      ]
+    ],
+    "scheme": "divinecanvas",
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "4f57a0b7-bfce-477f-9cb0-ee3f86bd4825"
+      }
+    },
+    "owner": "adarsh9780"
+  }
+}

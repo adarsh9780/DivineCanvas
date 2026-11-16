@@ -1,0 +1,103 @@
+diff --git a/node_modules/onnxruntime-react-native/android/build.gradle b/node_modules/onnxruntime-react-native/android/build.gradle
+index 41b4359..18df2b9 100644
+--- a/node_modules/onnxruntime-react-native/android/build.gradle
++++ b/node_modules/onnxruntime-react-native/android/build.gradle
+@@ -247,7 +247,7 @@ dependencies {
+     extractLibs "com.microsoft.onnxruntime:onnxruntime-android:latest.integration@aar"
+   }
+ 
+-  if (VersionNumber.parse(REACT_NATIVE_VERSION) < VersionNumber.parse("0.71")) {
++  if (REACT_NATIVE_VERSION.split("\\.")[0].toInteger() == 0 && REACT_NATIVE_MINOR_VERSION < 71) {
+     extractLibs "com.facebook.fbjni:fbjni:+:headers"
+     extractLibs "com.facebook.fbjni:fbjni:+"
+   }
+diff --git a/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java b/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java
+index c362e6a..e856465 100644
+--- a/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java
++++ b/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java
+@@ -48,7 +48,7 @@ public class OnnxruntimeModule extends ReactContextBaseJavaModule {
+       System.loadLibrary("onnxruntimejsi");
+       JavaScriptContextHolder jsContext = getReactApplicationContext().getJavaScriptContextHolder();
+       CallInvokerHolderImpl jsCallInvokerHolder =
+-        (CallInvokerHolderImpl) getReactApplicationContext().getCatalystInstance().getJSCallInvokerHolder();
++        (CallInvokerHolderImpl) getReactApplicationContext().getJSCallInvokerHolder();
+       nativeInstall(jsContext.get(), jsCallInvokerHolder);
+       return true;
+     } catch (Exception e) {
+diff --git a/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.h b/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.h
+index 288876c..cdbd971 100644
+--- a/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.h
++++ b/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.h
+@@ -5,8 +5,10 @@
+ #define OnnxruntimeModule_h
+ 
+ #import <React/RCTBridgeModule.h>
++#import <ReactCommon/RCTTurboModule.h>
++#import <ReactCommon/RCTTurboModuleWithJSIBindings.h>
+ 
+-@interface OnnxruntimeModule : NSObject <RCTBridgeModule>
++@interface OnnxruntimeModule : NSObject <RCTBridgeModule, RCTTurboModule, RCTTurboModuleWithJSIBindings>
+ 
+ @end
+ 
+diff --git a/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.mm b/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.mm
+index 8155f92..a8aed55 100644
+--- a/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.mm
++++ b/node_modules/onnxruntime-react-native/ios/OnnxruntimeModule.mm
+@@ -8,8 +8,13 @@
+ #import <React/RCTBridge+Private.h>
+ #import <React/RCTUtils.h>
+ #import <ReactCommon/RCTTurboModule.h>
++#import <ReactCommon/RCTInteropTurboModule.h>
+ #import <jsi/jsi.h>
+ 
++@interface RCTBridge (OrtJsiRuntime)
++- (void *)runtime;
++@end
++
+ @implementation OnnxruntimeModule
+ 
+ @synthesize bridge = _bridge;
+@@ -18,6 +23,16 @@ @implementation OnnxruntimeModule
+ 
+ RCT_EXPORT_MODULE(Onnxruntime)
+ 
++- (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
++    (const facebook::react::ObjCTurboModule::InitParams &)params {
++  return std::make_shared<facebook::react::ObjCInteropTurboModule>(params);
++}
++
++- (void)installJSIBindingsWithRuntime:(facebook::jsi::Runtime &)runtime
++                          callInvoker:(const std::shared_ptr<facebook::react::CallInvoker> &)callInvoker {
++  if (!env) env = onnxruntimejsi::install(runtime, callInvoker);
++}
++
+ - (void)setBridge:(RCTBridge*)bridge {
+   _bridge = bridge;
+ }
+@@ -27,12 +42,12 @@ - (void)setBridge:(RCTBridge*)bridge {
+  */
+ RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(install) {
+   @try {
+-    RCTCxxBridge* cxxBridge = (RCTCxxBridge*)_bridge;
+-    if (cxxBridge == nil) {
++    if (env) return @true;
++    if (_bridge == nil || ![_bridge respondsToSelector:@selector(runtime)]) {
+       return @false;
+     }
+ 
+-    auto jsiRuntime = (facebook::jsi::Runtime*)cxxBridge.runtime;
++    auto jsiRuntime = (facebook::jsi::Runtime*)[_bridge runtime];
+     if (jsiRuntime == nil) {
+       return @false;
+     }
+diff --git a/node_modules/onnxruntime-react-native/unimodule.json b/node_modules/onnxruntime-react-native/unimodule.json
+deleted file mode 100644
+index c2bd3c0..0000000
+--- a/node_modules/onnxruntime-react-native/unimodule.json
++++ /dev/null
+@@ -1,4 +0,0 @@
+-{
+-  "name": "onnxruntime-react-native",
+-  "platforms": ["ios", "android"]
+-}
