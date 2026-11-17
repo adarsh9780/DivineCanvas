@@ -21,8 +21,8 @@ import { isParadeeInstalled } from './speech/paradee/storage';
 import { dictionaryAvailable, downloadDictionary, lookupWord } from './dictionary';
 import type { DictionaryMeaning } from './dictionaryEngine';
 import { wordnetNotice } from './dictionaryNotice';
-import { chapters, passages, Passage, migrateLegacyPassageId } from './book';
-import { CHAPTER_POSITION_PREFIX, chapterPositionKey, chapterResumeIndex, chapterReadingProgress, SAVE_POSITION_SQL } from './readingProgress';
+import { books, GITA_BOOK_ID, type Book, type Passage, migrateLegacyPassageId } from './book';
+import { CHAPTER_POSITION_PREFIX, chapterPositionPrefix, chapterPositionKey, bookPositionKey, chapterResumeIndex, chapterReadingProgress, legacyGitaPositionCopies, SAVE_POSITION_SQL } from './readingProgress';
 
 import { backgrounds, backgroundLabels, palettes, fontSizes, parseAppearance, Background, ColorTheme, ReadingFontSize, Palette } from './readingAppearance';
 
@@ -31,7 +31,7 @@ function newImageSeed() { return Math.floor(Math.random() * 4294967295) || 1; }
 
 type UploadedImage = {id: string; filename: string; thumbFilename?: string};
 type Saved = Record<string, string>;
-type Screen = 'read' | 'chapters' | 'saved';
+type Screen = 'read' | 'chapters' | 'saved' | 'books';
 type NavigationItem = {key: string; title: string; detail: string; idx: number; progress?: {percent: number; label: string}};
 
 function AutoScrollCountdown({seconds, active, finished, colors}: {seconds: number; active: boolean; finished: boolean; colors: Palette}) {
@@ -62,7 +62,7 @@ export default function App() {
   const readerView = useRef<React.ComponentRef<typeof View>>(null);
   const sharing = useRef(false);
   const [sharingId, setSharingId] = useState<string | null>(null);
-  const [settingsPage, setSettingsPage] = useState<'menu' | 'reading' | 'appearance' | null>(null);
+  const [settingsPage, setSettingsPage] = useState<'menu' | 'reading' | 'appearance' | 'playback' | 'music' | null>(null);
   const [background, setBackground] = useState<Background>('images');
   const [colorTheme, setColorTheme] = useState<ColorTheme>('paper');
   const [imageSeed, setImageSeed] = useState(1);
@@ -82,9 +82,17 @@ export default function App() {
   const styles = useMemo(() => createStyles(colors), [colors]);
   const bookImages = useMemo(() => [...gitaImages, ...uploadedImages.map(image => ({id:image.id, source:{uri:new File(Paths.document, 'book-backgrounds', image.filename).uri}, thumbnail:{uri:new File(Paths.document, 'book-backgrounds', image.thumbFilename ?? image.filename).uri}}))], [uploadedImages]);
   const activeImages = useMemo(() => bookImages.filter(image => selectedImages.includes(image.id)), [bookImages, selectedImages]);
-  const [screen, setScreen] = useState<Screen>('read');
+  const [screen, setScreen] = useState<Screen>('books');
+  const [readerMenuOpen, setReaderMenuOpen] = useState(false);
+  const [activeBookId, setActiveBookId] = useState(GITA_BOOK_ID);
+  const activeBook = books.find(book => book.id === activeBookId) ?? books[0];
+  const {passages, chapters} = activeBook;
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(false);
   const [autoScrollSeconds, setAutoScrollSeconds] = useState(15);
+  const [readAloud, setReadAloud] = useState(false);
+  const readAloudRef = useRef(false);
+  const readerTap = useRef<{x: number; y: number; time: number} | null>(null);
+  const currentIndex = useRef(0);
   const [touchingReader, setTouchingReader] = useState(false);
   const [interactionCount, setInteractionCount] = useState(0);
   const speechEngine = useRef<SpeechEngine | null>(null);
@@ -127,7 +135,7 @@ export default function App() {
     // Expo Audio exposes playback configuration through mutable native player properties.
     // eslint-disable-next-line react-hooks/immutability
     musicPlayer.loop = true;
-    musicPlayer.volume = narrating ? musicVolume * 0.2 : musicVolume;
+    musicPlayer.volume = narrating ? musicVolume * 0.5 : musicVolume;
   }, [musicPlayer, musicVolume, narrating]);
   useEffect(() => {
     let cancelled = false;
@@ -141,9 +149,11 @@ export default function App() {
     return () => { cancelled = true; musicPlayer.pause(); };
   }, [musicPlayer, ready, musicEnabled, appActive, screen, musicStatus.isLoaded, musicFailed, musicAttempt]);
   const [index, setIndex] = useState(0);
-  const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('en');
+  const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('hi');
   const [saved, setSaved] = useState<Saved>({});
-  const [chapterPositions, setChapterPositions] = useState<Record<number, string>>({});
+  const [positionsByBook, setPositionsByBook] = useState<Record<string, Record<number, string>>>({});
+  const [lastByBook, setLastByBook] = useState<Record<string, string>>({});
+  const chapterPositions = positionsByBook[activeBook.id] ?? {};
   const positionWrites = useRef<Promise<void>>(Promise.resolve());
   const [editing, setEditing] = useState<string | null>(null);
   const [note, setNote] = useState('');
@@ -188,33 +198,39 @@ export default function App() {
       }
       const rows = await database.getAllAsync<{id: string; note: string}>('SELECT id, note FROM saves');
       setSaved(Object.fromEntries(rows.map(row => [row.id, row.note])));
-      const position = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'position'");
-      const last = passages.findIndex(p => p.id === position?.value);
-      const chapterRows = await database.getAllAsync<{key: string; value: string}>(
-        'SELECT key, value FROM settings WHERE key LIKE ?', `${CHAPTER_POSITION_PREFIX}%`,
-      );
-      const positions: Record<number, string> = {};
-      for (const row of chapterRows) {
-        const chapter = Number(row.key.slice(CHAPTER_POSITION_PREFIX.length));
-        if (passages.some(p => p.chapter === chapter && p.id === row.value)) positions[chapter] = row.value;
-      }
-      // Seed the chapter from the previous version's last-opened passage.
-      if (last >= 0) {
-        setIndex(last);
-        const passage = passages[last];
-        if (!positions[passage.chapter]) {
-          positions[passage.chapter] = passage.id;
-          await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', chapterPositionKey(passage.chapter), passage.id);
+      // Migrate existing Gita progress without overwriting newer book-scoped values.
+      const scopedMigration = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'book-progress-migrated'");
+      if (!scopedMigration) {
+        const oldPosition = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'position'");
+        const oldChapters = await database.getAllAsync<{key: string; value: string}>('SELECT key, value FROM settings WHERE key LIKE ?', `${CHAPTER_POSITION_PREFIX}%`);
+        for (const row of legacyGitaPositionCopies(GITA_BOOK_ID, books[0].passages, oldPosition?.value, oldChapters)) {
+          await database.runAsync('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', row.key, row.value);
         }
+        await database.runAsync("INSERT OR REPLACE INTO settings (key, value) VALUES ('book-progress-migrated', '1')");
       }
-      if (last < 0 && passages[0]) {
-        const first = passages[0];
-        positions[first.chapter] = first.id;
-        await database.runAsync(SAVE_POSITION_SQL, 'position', first.id, chapterPositionKey(first.chapter), first.id);
+      const savedBook = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'active-book'");
+      const selectedBook = books.find(book => book.id === savedBook?.value) ?? books[0];
+      const allPositions: Record<string, Record<number, string>> = {};
+      const allLast: Record<string, string> = {};
+      for (const book of books) {
+        const prefix = chapterPositionPrefix(book.id);
+        const chapterRows = await database.getAllAsync<{key: string; value: string}>('SELECT key, value FROM settings WHERE key LIKE ?', `${prefix}%`);
+        const positions: Record<number, string> = {};
+        for (const row of chapterRows) {
+          const chapter = Number(row.key.slice(prefix.length));
+          if (book.passages.some(p => p.chapter === chapter && p.id === row.value)) positions[chapter] = row.value;
+        }
+        allPositions[book.id] = positions;
+        const position = await database.getFirstAsync<{value: string}>('SELECT value FROM settings WHERE key = ?', bookPositionKey(book.id));
+        if (position && book.passages.some(p => p.id === position.value)) allLast[book.id] = position.value;
       }
-      setChapterPositions(positions);
+      setPositionsByBook(allPositions);
+      setLastByBook(allLast);
+      setActiveBookId(selectedBook.id);
+      const last = selectedBook.passages.findIndex(p => p.id === allLast[selectedBook.id]);
+      if (last >= 0) { currentIndex.current = last; setIndex(last); }
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
-      if (lang?.value === 'hi' || lang?.value === 'sa') setLanguage(lang.value);
+      if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(lang.value);
       const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
@@ -321,17 +337,20 @@ export default function App() {
     setSaved(current => ({ ...current, [editing]: note })); setEditing(null);
   }
   const rememberPosition = useCallback((i: number) => {
-    const passage = passages[i];
+    const book = books.find(candidate => candidate.id === activeBookId) ?? books[0];
+    const passage = book.passages[i];
     const database = db.current;
     if (!passage || !database) return;
+    currentIndex.current = i;
     setIndex(i);
     setSelectedWord(null);
-    setChapterPositions(current => ({...current, [passage.chapter]: passage.id}));
+    setPositionsByBook(current => ({...current, [book.id]: {...current[book.id], [passage.chapter]: passage.id}}));
+    setLastByBook(current => ({...current, [book.id]: passage.id}));
     // Keep rapid swipes in order; both positions are saved in one atomic statement.
     positionWrites.current = positionWrites.current.then(async () => {
-      await database.runAsync(SAVE_POSITION_SQL, 'position', passage.id, chapterPositionKey(passage.chapter), passage.id);
+      await database.runAsync(SAVE_POSITION_SQL, bookPositionKey(book.id), passage.id, chapterPositionKey(book.id, passage.chapter), passage.id);
     }).catch(() => Alert.alert('Reading position could not be saved', 'Please try opening this passage again.'));
-  }, []);
+  }, [activeBookId]);
   async function sharePassage(passage: Passage) {
     if (sharing.current) return;
     const view = readerView.current;
@@ -389,20 +408,40 @@ export default function App() {
     setNarrating(false);
   }, [narrationPlayer]);
 
+  const stopReadAloud = useCallback(() => {
+    readAloudRef.current = false;
+    setReadAloud(false);
+    stopNarration();
+  }, [stopNarration]);
+
   useEffect(() => {
     const subscription = narrationPlayer.addListener('playbackStatusUpdate', status => {
-      if (status.didJustFinish) stopNarration();
-      else if (status.error && speechAbort.current) {stopNarration(); Alert.alert('Could not play narration', status.error);}
+      if (status.didJustFinish && speechFile.current) {
+        const shouldAdvance = readAloudRef.current;
+        stopNarration();
+        if (shouldAdvance) {
+          const next = currentIndex.current + 1;
+          if (next < passages.length && list.current) {
+            list.current.scrollToIndex({index:next, animated:true});
+            rememberPosition(next);
+          } else {
+            stopReadAloud();
+          }
+        }
+      } else if (status.error && speechAbort.current) {
+        stopReadAloud();
+        Alert.alert('Could not play narration', status.error);
+      }
     });
     return () => subscription.remove();
-  }, [narrationPlayer, stopNarration]);
+  }, [narrationPlayer, passages, rememberPosition, stopNarration, stopReadAloud]);
 
   useEffect(() => () => { stopNarration(); }, [index, language, screen, appActive, stopNarration]);
 
-  async function getSpeechEngine() {
+  const getSpeechEngine = useCallback(async () => {
     if (!speechEngine.current) speechEngine.current = await speechEngines.create(defaultSpeechEngineId);
     return speechEngine.current;
-  }
+  }, []);
   async function downloadVoice() {
     if (!runtimeAvailable) {Alert.alert('Development build needed', 'This voice requires an app build with the speech runtime. Expo Go cannot run it.'); return;}
     if (voiceDownload !== null) return;
@@ -415,31 +454,55 @@ export default function App() {
     finally {speechDownloadAbort.current = null; setVoiceDownload(null);}
   }
   async function removeVoice() {
-    try {stopNarration(); const engine=await getSpeechEngine(); await engine.uninstall(); setVoiceInstalled(false);}
+    try {stopReadAloud(); const engine=await getSpeechEngine(); await engine.uninstall(); setVoiceInstalled(false);}
     catch (error) {Alert.alert('Could not remove voice', error instanceof Error ? error.message : 'Please try again.');}
   }
-  async function readPassage(passage: Passage) {
-    if (narrating) {stopNarration(); return;}
-    if (!runtimeAvailable) {Alert.alert('Development build needed', 'This voice requires an app build with the speech runtime. Expo Go cannot run it.'); return;}
-    if (!voiceInstalled) {Alert.alert('Download a voice', 'Open Settings and download the reading voice first.'); return;}
+  const startNarration = useCallback(async (passage: Passage) => {
+    if (!runtimeAvailable || !voiceInstalled) {
+      stopReadAloud();
+      Alert.alert(!runtimeAvailable ? 'Development build needed' : 'Download a voice', !runtimeAvailable ? 'This voice requires an app build with the speech runtime. Expo Go cannot run it.' : 'Open Settings and download the reading voice first.');
+      return;
+    }
     const controller=new AbortController(); speechAbort.current=controller; setNarrating(true);
     try {
       const engine=await getSpeechEngine();
-      const speechLanguage = language;
-      const voice = engine.info.voices.find(candidate => candidate.languages.includes(speechLanguage));
+      const voice = engine.info.voices.find(candidate => candidate.languages.includes(language));
       if (!voice) throw new Error('No voice is available for this language.');
-      const result=await engine.synthesize({text:passage[language],language:speechLanguage,voiceId:voice.id},controller.signal);
+      const result=await engine.synthesize({text:passage[language],language,voiceId:voice.id},controller.signal);
       if (controller.signal.aborted) {await result.dispose(); return;}
       speechFile.current=result;
       await setAudioModeAsync({playsInSilentMode:true,shouldPlayInBackground:false,interruptionMode:'mixWithOthers'});
-      if (controller.signal.aborted) {await result.dispose(); return;}
+      if (controller.signal.aborted) return;
       narrationPlayer.replace({uri:result.uri}); narrationPlayer.play();
-    } catch(error) {if (!controller.signal.aborted) {stopNarration(); Alert.alert('Could not read this passage', error instanceof Error ? error.message : 'Please try again.');}}
+    } catch(error) {
+      if (!controller.signal.aborted) {
+        stopReadAloud();
+        Alert.alert('Could not read this passage', error instanceof Error ? error.message : 'Please try again.');
+      }
+    }
+  }, [getSpeechEngine, language, narrationPlayer, runtimeAvailable, stopReadAloud, voiceInstalled]);
+
+  useEffect(() => {
+    if (!readAloud || !ready || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null) return;
+    const timer = setTimeout(() => { void startNarration(passages[index]); }, 0);
+    return () => { clearTimeout(timer); stopNarration(); };
+  }, [readAloud, ready, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, index, passages, startNarration, stopNarration]);
+
+  function toggleReadAloud(value: boolean) {
+    if (!value) { stopReadAloud(); return; }
+    if (!runtimeAvailable || !voiceInstalled) {
+      Alert.alert(!runtimeAvailable ? 'Development build needed' : 'Download a voice', !runtimeAvailable ? 'Read aloud requires an app build with the speech runtime.' : 'Download the reading voice below to use Read aloud.');
+      return;
+    }
+    stopNarration();
+    if (autoScrollEnabled) { setAutoScrollEnabled(false); savePreference('auto-scroll-enabled', 'false'); }
+    readAloudRef.current = true;
+    setReadAloud(true);
   }
   useEffect(() => () => { speechDownloadAbort.current?.abort(); speechAbort.current?.abort(); const engine=speechEngine.current; if (engine) void engine.dispose(); }, []);
 
   useEffect(() => {
-    if (!ready || !autoScrollEnabled || !appActive || screen !== 'read' || settingsPage !== null || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || index >= passages.length - 1) return;
+    if (!ready || !autoScrollEnabled || readAloud || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || index >= passages.length - 1) return;
     const timer = setTimeout(() => {
       const next = index + 1;
       if (!list.current) return;
@@ -447,11 +510,22 @@ export default function App() {
       rememberPosition(next);
     }, autoScrollSeconds * 1000);
     return () => clearTimeout(timer);
-  }, [ready, autoScrollEnabled, autoScrollSeconds, appActive, screen, settingsPage, editing, dictionaryWord, sharingId, selectedWord, narrating, touchingReader, index, interactionCount, rememberPosition]);
+  }, [ready, autoScrollEnabled, readAloud, autoScrollSeconds, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, selectedWord, narrating, touchingReader, index, interactionCount, rememberPosition, passages.length]);
 
   function jump(i: number) { if (i < 0) return; rememberPosition(i); setScreen('read'); }
+  function openBook(book: Book) {
+    stopReadAloud();
+    const resume = book.passages.findIndex(p => p.id === lastByBook[book.id]);
+    const next = Math.max(0, resume);
+    currentIndex.current = next;
+    setSelectedWord(null);
+    setActiveBookId(book.id);
+    setIndex(next);
+    setScreen('read');
+    savePreference('active-book', book.id);
+  }
   const autoScrollFinished = index >= passages.length - 1;
-  const autoScrollRunning = ready && autoScrollEnabled && appActive && screen === 'read' && settingsPage === null && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
+  const autoScrollRunning = ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
   if (!ready) return <View style={styles.loading}><ActivityIndicator color={colors.accent}/></View>;
   return <SafeAreaView style={styles.root}
     onTouchCancel={() => {setTouchingReader(false); setInteractionCount(count => count + 1);}}
@@ -477,10 +551,33 @@ export default function App() {
         setSelectedWord(null);
       }, 0);
     }}><StatusBar style={colors.dark ? "light" : "dark"} />
-    <View style={styles.header}><Pressable accessibilityRole="button" accessibilityLabel="Open settings" accessibilityState={{expanded:settingsPage !== null}} onPress={() => setSettingsPage('menu')} style={styles.profileButton}><View accessible={false} style={styles.profileGlyph}><View style={styles.profileHead}/><View style={styles.profileShoulders}/></View></Pressable>{autoScrollEnabled && screen === 'read' && <AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/>}<View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? 'Loading reading music' : musicFailed && musicEnabled ? 'Music unavailable. Tap to retry' : musicEnabled ? 'Mute reading music' : 'Unmute reading music'} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable><Pressable accessibilityRole="button" accessibilityLabel="Switch between English, Hindi and Sanskrit" onPress={() => { const next = language === 'en' ? 'hi' : language === 'hi' ? 'sa' : 'en'; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? 'English ▾' : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable></View></View>
-    <View ref={readerView} collapsable={false} style={styles.main} onLayout={e => setReaderHeight(e.nativeEvent.layout.height)}>
+    {screen === 'read' ? <>
+      <View style={styles.header}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Back to books" onPress={() => setScreen('books')} style={styles.profileButton}><Text style={styles.readerBack}>‹</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Chapters" onPress={() => setScreen('chapters')} style={styles.profileButton}>
+          <Svg width={23} height={23} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M4 6h2M4 12h2M4 18h2M10 6h10M10 12h10M10 18h10"/></Svg>
+        </Pressable>
+        <View style={{flex:1}}/>
+        <Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? 'Loading reading music' : musicFailed && musicEnabled ? 'Music unavailable. Tap to retry' : musicEnabled ? 'Mute reading music' : 'Unmute reading music'} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Switch between English, Hindi and Sanskrit" onPress={() => { const next = language === 'en' ? 'hi' : language === 'hi' ? 'sa' : 'en'; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? 'English ▾' : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Book menu" accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable>
+      </View>
+      {readAloud ? <Pressable accessibilityRole="button" accessibilityLabel="Stop read aloud" onPress={stopReadAloud} style={styles.playbackStatus}><Text style={styles.settingsMenuDescription}>Reading aloud · tap to stop</Text></Pressable> : autoScrollEnabled && <View style={styles.playbackStatus}><AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/></View>}
+    </> : <View style={styles.settingsNavigationHeader}>
+      {screen !== 'books' && <Pressable accessibilityRole="button" accessibilityLabel="Back to reader" onPress={() => setScreen('read')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>}
+      <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{screen === 'books' ? 'Books' : screen === 'chapters' ? 'Chapters' : 'Saved passages'}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel="Open settings" onPress={() => setSettingsPage('menu')} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><Path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7ZM19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06-1.8 3.12-.08-.02a1.7 1.7 0 0 0-1.79.63l-.05.07h-3.6l-.04-.07a1.7 1.7 0 0 0-1.8-.63l-.08.02-1.8-3.12.06-.06A1.7 1.7 0 0 0 9.16 15l-.08-.03-1.8-3.12.05-.07a1.7 1.7 0 0 0 0-1.87l-.05-.07 1.8-3.12.08.02a1.7 1.7 0 0 0 1.8-.63l.04-.07h3.6l.05.07a1.7 1.7 0 0 0 1.79.63l.08-.02 1.8 3.12-.06.06a1.7 1.7 0 0 0-.34 1.87l.08.04v3.6l-.08.03Z" transform="translate(-2.3 0)"/></Svg></Pressable>
+    </View>}
+    <View ref={readerView} collapsable={false} style={styles.main} onLayout={e => setReaderHeight(e.nativeEvent.layout.height)}
+      onTouchStart={event => { readerTap.current = readAloudRef.current && screen === 'read' && settingsPage === null ? {x:event.nativeEvent.pageX, y:event.nativeEvent.pageY, time:Date.now()} : null; }}
+      onTouchCancel={() => { readerTap.current = null; }}
+      onTouchEnd={event => {
+        const tap = readerTap.current;
+        readerTap.current = null;
+        if (tap && Date.now() - tap.time <= 350 && Math.hypot(event.nativeEvent.pageX - tap.x, event.nativeEvent.pageY - tap.y) <= 12) stopReadAloud();
+      }}>
       {screen === 'read' && background === 'images' && activeImages.length > 0 && <View pointerEvents="none" style={styles.fixedBackground}><FilterImage source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" filters={imageFilters}/><View style={styles.backgroundScrim}/></View>}
-      {screen === 'read' ? <FlatList key={`${readerHeight}-${width}`} ref={list} data={passages} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item}) => <View style={[styles.page, background === 'images' && styles.transparentPage, {height: readerHeight}]}>
+      {screen === 'read' ? <FlatList key={`${activeBook.id}-${readerHeight}-${width}`} ref={list} data={passages} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item}) => <View style={[styles.page, background === 'images' && styles.transparentPage, {height: readerHeight}]}>
 
         <ScrollView style={styles.reading} contentContainerStyle={styles.readingContent}><TextInput
           accessibilityLabel="Passage text"
@@ -517,8 +614,15 @@ export default function App() {
           }}
           style={[styles.passage,styles.passageInput,background === 'images' && styles.imagePassage,{fontSize,lineHeight:Math.round(fontSize * 1.5),height:passageHeights[`${item.id}-${language}-${fontSize}-${width}`]}]}
         /></ScrollView>
-        <View><View style={styles.pageBottom}><View style={styles.referenceGroup}><Text accessibilityLabel={`Bhagavad Gita, chapter ${item.chapter}, ${item.label}`} style={[styles.reference,background === 'images' && styles.imageReference]}>Gita {item.chapter}.{item.label.replace(/^TEXTS?\s+/i, '')}</Text>{selectedWord?.passageId === item.id && selectedWord.language === language && sharingId !== item.id && <Pressable accessibilityRole="button" accessibilityLabel={`Look up ${selectedWord.word}`} onPress={() => void showWord(selectedWord.word, selectedWord.language)} style={styles.lookupButton}><Text numberOfLines={1} style={styles.lookupText}>Look up “{selectedWord.word}”</Text></Pressable>}</View><View style={[styles.actions,sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={narrating ? 'Stop reading aloud' : 'Read passage aloud'} onPress={() => void readPassage(item)} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{narrating ? <Path d="M7 7h10v10H7z"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved, item.id) ? 'Remove saved passage' : 'Save passage'} onPress={() => void toggle(item)} style={styles.action}><Text style={styles.heart}>{Object.hasOwn(saved, item.id) ? '♥' : '♡'}</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="Share passage image" accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null} onPress={() => void sharePassage(item)} style={styles.action}><Svg accessible={false} width={22} height={22} viewBox="0 0 24 24" fill="none"><Path d="M22 2 9.5 14.5M22 2l-7.5 20-5-7.5L2 9.5 22 2Z" stroke={colors.accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg></Pressable>{Object.hasOwn(saved, item.id) && <Pressable accessibilityRole="button" accessibilityLabel="Edit note" onPress={() => {setEditing(item.id); setNote(saved[item.id]);}} style={styles.action}><Text style={styles.noteIcon}>✎</Text></Pressable>}</View></View></View>
-      </View>}/> : <View style={styles.section}><Text style={styles.title}>{screen === 'chapters' ? 'Chapters' : 'Saved passages'}</Text><FlatList<NavigationItem> data={screen === 'chapters' ? chapters.map(c => {
+        <View><View style={styles.pageBottom}><View style={styles.referenceGroup}><Text accessibilityLabel={`${activeBook.title}, chapter ${item.chapter}, ${item.label}`} style={[styles.reference,background === 'images' && styles.imageReference]}>{activeBook.shortTitle} {item.chapter}.{item.label.replace(/^TEXTS?\s+/i, '')}</Text>{selectedWord?.passageId === item.id && selectedWord.language === language && sharingId !== item.id && <Pressable accessibilityRole="button" accessibilityLabel={`Look up ${selectedWord.word}`} onPress={() => void showWord(selectedWord.word, selectedWord.language)} style={styles.lookupButton}><Text numberOfLines={1} style={styles.lookupText}>Look up “{selectedWord.word}”</Text></Pressable>}</View><View style={[styles.actions,sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={narrating ? 'Stop reading aloud' : 'Read passage aloud'} onPress={() => {if (readAloud || readAloudRef.current) stopReadAloud(); else if (narrating) stopNarration(); else void startNarration(item);}} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{narrating ? <Path d="M7 7h10v10H7z"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved, item.id) ? 'Remove saved passage' : 'Save passage'} onPress={() => void toggle(item)} style={styles.action}><Text style={styles.heart}>{Object.hasOwn(saved, item.id) ? '♥' : '♡'}</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="Share passage image" accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null} onPress={() => void sharePassage(item)} style={styles.action}><Svg accessible={false} width={22} height={22} viewBox="0 0 24 24" fill="none"><Path d="M22 2 9.5 14.5M22 2l-7.5 20-5-7.5L2 9.5 22 2Z" stroke={colors.accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg></Pressable>{Object.hasOwn(saved, item.id) && <Pressable accessibilityRole="button" accessibilityLabel="Edit note" onPress={() => {setEditing(item.id); setNote(saved[item.id]);}} style={styles.action}><Text style={styles.noteIcon}>✎</Text></Pressable>}</View></View></View>
+      </View>}/> : screen === 'books' ? <View style={styles.section}>
+        <FlatList data={books} keyExtractor={book => book.id} renderItem={({item}) => {
+          const last = item.passages.find(p => p.id === lastByBook[item.id]);
+          return <Pressable accessibilityRole="button" accessibilityLabel={`Open ${item.title}`} onPress={() => openBook(item)} style={styles.row}>
+            <View style={{flex:1}}><Text style={styles.rowTitle}>{item.title}</Text><Text style={styles.bookDetail}>{last ? `Continue · Chapter ${last.chapter}` : `${item.chapters.length} chapters`}</Text></View><Text style={styles.arrow}>›</Text>
+          </Pressable>;
+        }}/>
+      </View> : <View style={styles.section}><FlatList<NavigationItem> data={screen === 'chapters' ? chapters.map(c => {
         const resumeIndex = chapterResumeIndex(passages, c.number, chapterPositions[c.number]);
         return {key: String(c.number), title: c.title,
           detail: `CHAPTER ${String(c.number).padStart(2, '0')}`,
@@ -529,12 +633,19 @@ export default function App() {
           <View accessibilityRole="progressbar" accessibilityLabel={`Reading position: ${item.progress.label}`} accessibilityValue={{min:0,max:100,now:item.progress.percent}} style={styles.progressTrack}><View style={[styles.progressFill,{width:`${item.progress.percent}%`}]}/></View>
         </View>}</View><Text style={styles.arrow}>↗</Text></Pressable>}/></View>}
     </View>
-    <View style={styles.nav}>{(['read','chapters','saved'] as Screen[]).map(tab => <Pressable key={tab} accessibilityRole="button" accessibilityState={{selected: screen === tab}} onPress={() => setScreen(tab)} style={styles.navItem}><Text style={[styles.navText, screen === tab && styles.navActive]}>{tab === 'read' ? 'Read' : tab === 'chapters' ? 'Chapters' : 'Saved'}</Text><View style={[styles.dot, screen === tab && styles.dotActive]}/></Pressable>)}</View>
+    {readerMenuOpen && <View style={styles.readerMenuOverlay}>
+      <Pressable accessibilityRole="button" accessibilityLabel="Close book menu" onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
+      <View style={styles.sheet}>
+        <Text accessibilityRole="header" style={styles.readerMenuTitle}>{activeBook.title}</Text>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>Saved verses and notes</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSettingsPage('menu');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>Settings</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+      </View>
+    </View>}
     <Modal visible={settingsPage !== null} animationType="slide" onRequestClose={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')}>
       <SafeAreaProvider><SafeAreaView style={styles.settingsScreen}>
         <View style={styles.settingsNavigationHeader}>
           <Pressable accessibilityRole="button" accessibilityLabel={settingsPage === 'menu' ? 'Back to reader' : 'Back to settings'} onPress={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>
-          <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'reading' ? 'Reading customisation' : settingsPage === 'appearance' ? 'App appearance' : 'Settings'}</Text>
+          <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'reading' ? 'Reading customisation' : settingsPage === 'appearance' ? 'App appearance' : settingsPage === 'playback' ? 'Reading playback' : settingsPage === 'music' ? 'Music' : 'Settings'}</Text>
         </View>
         {settingsPage === 'menu' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <Pressable accessibilityRole="button" accessibilityLabel="Reading customisation" onPress={() => setSettingsPage('reading')} style={styles.settingsListRow}>
@@ -543,8 +654,20 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel="App appearance" onPress={() => setSettingsPage('appearance')} style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>App appearance</Text><Text style={styles.settingsMenuDescription}>Choose the colors used throughout the app.</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Reading playback" onPress={() => setSettingsPage('playback')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading playback</Text><Text style={styles.settingsMenuDescription}>Manage read aloud and auto-scroll.</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Music" onPress={() => setSettingsPage('music')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Music</Text><Text style={styles.settingsMenuDescription}>Control background music and volume.</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+          <View style={styles.settingsCredits}>
+            <Text style={styles.settingsCreditText}>Bhagavad Gita Hindi and English translations by Hansi Gita Bhawan Trust.</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://gitabhawan.org.in/gita/research')} style={styles.settingsCreditLink}>View source and terms ↗</Text>
+          </View>
+        </ScrollView> : settingsPage === 'playback' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Bhagavad Gita source</Text><Text style={styles.settingsMenuDescription}>Hindi and English translations by Hansi Gita Bhawan Trust.</Text><Text accessibilityRole="link" onPress={() => void Linking.openURL('https://gitabhawan.org.in/gita/research')} style={[styles.settingsMenuDescription, {color:colors.accent}]}>View source and terms</Text></View>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Read aloud</Text><Text style={styles.settingsMenuDescription}>Read each passage and move to the next when finished. Tap the reader to stop.</Text></View>
+            <Switch accessibilityLabel="Read aloud" value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading voice</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `Downloading ${Math.round(voiceDownload*100)}%` : voiceInstalled ? 'Paradee voice is available offline.' : 'Download an offline voice (about 11 MB).'}</Text></View>
@@ -552,14 +675,19 @@ export default function App() {
           </View>
           {!runtimeAvailable && <Text style={styles.imageHelp}>Reading aloud requires a development build.</Text>}
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Auto-scroll</Text><Text style={styles.settingsMenuDescription}>Move to the next passage automatically.</Text></View>
-            <Switch accessibilityLabel="Auto-scroll" value={autoScrollEnabled} onValueChange={value => {setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Auto-scroll</Text><Text style={styles.settingsMenuDescription}>Move to the next passage after a chosen time.</Text></View>
+            <Switch accessibilityLabel="Auto-scroll" value={autoScrollEnabled} onValueChange={value => {if (value) stopReadAloud(); setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />
           </View>
           <View style={{paddingVertical:18}}>
             <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>Time per passage</Text><Text style={styles.settingsMenuDescription}>{autoScrollSeconds} seconds</Text></View>
             <Slider accessibilityLabel="Time per passage" accessibilityValue={{min:5,max:60,now:autoScrollSeconds,text:`${autoScrollSeconds} seconds`}} minimumValue={5} maximumValue={60} step={1} value={autoScrollSeconds} onValueChange={setAutoScrollSeconds} onSlidingComplete={value => {setAutoScrollSeconds(value); savePreference('auto-scroll-seconds', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
-            <Text style={styles.settingsMenuDescription}>Auto-scroll pauses while you interact and stops at the end of the book.</Text>
+            <Text style={styles.settingsMenuDescription}>Timed scrolling pauses while you interact. Read aloud advances after the voice finishes instead.</Text>
           </View>
+          <View style={styles.settingsCredits}>
+            <Text style={styles.settingsCreditText}>Reading voice: Paradee by Sahil Mahendrakar.</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/sahilmahendrakar/paradee')} style={styles.settingsCreditLink}>Voice source ↗</Text>
+          </View>
+        </ScrollView> : settingsPage === 'music' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading music</Text><Text style={styles.settingsMenuDescription}>Play instrumental music while reading.</Text></View>
             <Switch accessibilityLabel="Reading music" value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
@@ -567,9 +695,11 @@ export default function App() {
           <View style={{paddingVertical: 18}}>
             <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>Music volume</Text><Text style={styles.settingsMenuDescription}>{Math.round(musicVolume * 100)}%</Text></View>
             <Slider accessibilityLabel="Music volume" accessibilityValue={{min:0,max:100,now:Math.round(musicVolume*100)}} minimumValue={0} maximumValue={1} step={0.01} value={musicVolume} onValueChange={setMusicVolume} onSlidingComplete={value => {setMusicVolume(value); void setting('music-volume', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
-            <Text style={styles.settingsMenuDescription}>“Krishna Flute Music” by Alex Morgan · CC BY 4.0</Text>
-            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://freemusicarchive.org/music/alex-morgan/world-devotional-music/krishna-flute-music/')} style={[styles.settingsMenuDescription, {color:colors.accent, marginTop:6}]}>Music source</Text>
-            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')} style={[styles.settingsMenuDescription, {color:colors.accent, marginTop:6}]}>Creative Commons license</Text>
+            <View style={styles.settingsCredits}>
+              <Text style={styles.settingsCreditText}>“Krishna Flute Music” by Alex Morgan, licensed under Creative Commons Attribution 4.0.</Text>
+              <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://freemusicarchive.org/music/alex-morgan/world-devotional-music/krishna-flute-music/')} style={styles.settingsCreditLink}>Music source ↗</Text>
+              <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')} style={styles.settingsCreditLink}>License ↗</Text>
+            </View>
           </View>
         </ScrollView> : settingsPage === 'reading' ? <ScrollView contentContainerStyle={styles.settingsContent}>
           <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>Text size</Text><Text style={styles.imageHelp}>Choose a comfortable size for reading.</Text></View><View style={styles.sizeOptions}>
@@ -634,4 +764,4 @@ export default function App() {
     <Modal visible={editing !== null} transparent animationType="slide" onRequestClose={() => setEditing(null)}><View style={styles.overlay}><View style={styles.sheet}><Text style={styles.title}>Add a note</Text><TextInput accessibilityLabel="Your note" multiline value={note} onChangeText={setNote} placeholder="Write something…" placeholderTextColor={colors.muted} style={styles.input}/><View style={styles.sheetActions}><Pressable onPress={() => setEditing(null)} style={styles.button}><Text style={{color:colors.ink}}>Close</Text></Pressable><Pressable onPress={() => void saveNote()} style={[styles.button, styles.buttonPrimary]}><Text style={{color: colors.onAccent, fontWeight:'600'}}>Save note</Text></Pressable></View></View></View></Modal>
   </SafeAreaView>;
 }
-const createStyles = (colors: Palette) => StyleSheet.create({root:{flex:1,backgroundColor:colors.paper},loading:{flex:1,justifyContent:'center',backgroundColor:colors.paper},header:{paddingHorizontal:24,paddingTop:18,paddingBottom:16,flexDirection:'row',justifyContent:'space-between',alignItems:'center',borderBottomWidth:1,borderColor:colors.line},language:{paddingVertical:10,paddingHorizontal:14,backgroundColor:colors.white,borderRadius:24},languageText:{fontWeight:'600',color:colors.ink},profileButton:{width:44,height:44,borderRadius:22,alignItems:'center',justifyContent:'center'},profileGlyph:{width:24,height:24,transform:[{scale:0.85}]},profileHead:{position:'absolute',top:1,left:8,width:8,height:8,borderWidth:1.5,borderColor:colors.ink,borderRadius:4},profileShoulders:{position:'absolute',bottom:2,left:3,width:18,height:10,borderWidth:1.5,borderColor:colors.ink,borderTopLeftRadius:10,borderTopRightRadius:10,borderBottomWidth:0},settingsScreen:{flex:1,backgroundColor:colors.paper},settingsNavigationHeader:{minHeight:64,flexDirection:'row',alignItems:'center',paddingHorizontal:16,borderBottomWidth:1,borderColor:colors.line},settingsBackButton:{width:44,height:48,alignItems:'center',justifyContent:'center',marginRight:8},settingsNavigationTitle:{flex:1,fontSize:20,fontWeight:'600',color:colors.ink},settingsList:{paddingHorizontal:24,paddingTop:16},settingsListRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:18,borderBottomWidth:1,borderColor:colors.line},choiceRow:{minHeight:68,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:14,borderBottomWidth:1,borderColor:colors.line},choiceCheck:{fontSize:20,fontWeight:'600',color:colors.accent,minWidth:24,textAlign:'center'},paletteName:{flex:1,fontSize:16,color:colors.ink},paletteSwatches:{flexDirection:'row',gap:6},paletteSwatch:{width:24,height:24,borderRadius:12,borderWidth:1,borderColor:colors.line},colorHints:{gap:10},colorHint:{fontSize:14,lineHeight:21,color:colors.muted},colorHintStrong:{fontWeight:'600',color:colors.ink},settingsHeader:{flexDirection:'row',alignItems:'center',paddingHorizontal:20,paddingVertical:16,borderBottomWidth:1,borderColor:colors.line},settingsTitle:{flex:1,fontFamily:'serif',fontSize:24,color:colors.ink},backIcon:{fontSize:32,color:colors.ink,lineHeight:36},closeIcon:{fontSize:28,color:colors.muted},settingsMenu:{padding:24},settingsMenuRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,padding:20,borderRadius:16,backgroundColor:colors.white},settingsMenuText:{flex:1,gap:6},settingsMenuTitle:{fontSize:16,fontWeight:'600',color:colors.ink},settingsMenuDescription:{fontSize:14,color:colors.muted},settingsChevron:{fontSize:28,color:colors.muted},settingsContent:{gap:32,padding:24},preferenceGroup:{gap:16},preferenceLabel:{fontSize:14,fontWeight:'600',color:colors.ink},sizeOptions:{flexDirection:'row',gap:8},sizeOption:{flex:1,minHeight:88,borderRadius:12,backgroundColor:colors.paper,padding:12,alignItems:'center',justifyContent:'center',gap:8},selectedOption:{backgroundColor:colors.accent},selectedText:{color:colors.onAccent,fontWeight:'600'},sizeSample:{color:colors.ink},optionLabel:{fontSize:13,color:colors.muted},backgroundOption:{flex:1,alignItems:'center',gap:8,minHeight:72},imageSwatch:{overflow:'hidden',backgroundColor:colors.ink},swatchImage:{position:'absolute',width:'100%',height:'100%'},swatchCheck:{color:'#fff',fontSize:20,textShadowColor:'#000',textShadowRadius:4},imagePreview:{height:136,borderRadius:14,overflow:'hidden',justifyContent:'center',alignItems:'center',backgroundColor:'#181818'},imagePreviewText:{fontFamily:'serif',fontSize:20,color:'#fff'},blurHeading:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},blurSlider:{width:'100%',height:44,marginTop:8},blurLabels:{flexDirection:'row',justifyContent:'space-between'},imageHelp:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},imageGrid:{flexDirection:'row',flexWrap:'wrap',gap:10},imageOption:{width:72,height:92,borderRadius:12,overflow:'hidden',borderWidth:2,borderColor:'transparent'},imageOptionSelected:{borderColor:colors.accent},imageThumbnail:{width:'100%',height:'100%'},imageCheck:{position:'absolute',right:4,top:4,width:22,height:22,borderRadius:11,backgroundColor:colors.accent,alignItems:'center',justifyContent:'center'},imageCheckText:{color:colors.onAccent,fontSize:14,fontWeight:'700'},addImages:{alignSelf:'flex-start',paddingVertical:10,paddingHorizontal:16,borderRadius:20,backgroundColor:colors.white},addImagesText:{color:colors.accent,fontWeight:'600'},swatch:{width:48,height:48,borderRadius:24,borderWidth:2,alignItems:'center',justifyContent:'center'},doneButton:{alignItems:'center'},main:{flex:1},fixedBackground:{position:'absolute',top:0,right:0,bottom:0,left:0,overflow:'hidden',backgroundColor:'#181818'},backgroundImage:{width:'100%',height:'100%'},backgroundScrim:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'rgba(0,0,0,0.64)'},transparentPage:{backgroundColor:'transparent'},imagePassage:{color:'#ffffff'},imageReference:{color:'#ffffff'},page:{backgroundColor:colors.paper,paddingHorizontal:28,paddingTop:24,paddingBottom:24},eyebrow:{fontSize:10,fontWeight:'700',letterSpacing:1.6,color:colors.accent},reading:{flex:1},readingContent:{flexGrow:1,justifyContent:'center',paddingVertical:24},passage:{fontSize:26,lineHeight:39,color:colors.ink,fontFamily:'serif'},passageInput:{padding:0,margin:0,textAlignVertical:'top'},referenceGroup:{alignItems:'flex-start',gap:12,flex:1},lookupButton:{maxWidth:'100%',paddingHorizontal:16,paddingVertical:10,borderRadius:20,backgroundColor:colors.white},lookupText:{fontSize:14,fontWeight:'600',color:colors.accent},reference:{fontSize:14,color:colors.muted},pageBottom:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:16},actions:{flexDirection:'column',gap:8},hiddenActions:{opacity:0},action:{width:44,height:44,borderRadius:22,backgroundColor:colors.white,alignItems:'center',justifyContent:'center'},heart:{fontSize:22,color:colors.accent},noteIcon:{fontSize:20,color:colors.ink},section:{flex:1,paddingHorizontal:28,paddingTop:36},title:{fontFamily:'serif',fontSize:32,color:colors.ink,marginTop:8,marginBottom:24},row:{paddingVertical:20,borderBottomWidth:1,borderColor:colors.line,flexDirection:'row',alignItems:'center',gap:16},rowLabel:{fontSize:10,letterSpacing:1,color:colors.accent,fontWeight:'700'},rowTitle:{fontSize:18,lineHeight:26,color:colors.ink,marginTop:8,fontFamily:'serif'},chapterProgress:{marginTop:16,gap:8},progressLabels:{flexDirection:'row',justifyContent:'space-between',gap:8},progressText:{fontSize:13,color:colors.muted},progressTrack:{height:4,borderRadius:2,backgroundColor:colors.line,overflow:'hidden'},progressFill:{height:'100%',borderRadius:2,backgroundColor:colors.accent},arrow:{fontSize:22,color:colors.muted},empty:{color:colors.muted,lineHeight:24,marginTop:24},nav:{flexDirection:'row',borderTopWidth:1,borderColor:colors.line,backgroundColor:colors.white,paddingVertical:12},navItem:{flex:1,alignItems:'center',padding:8},navText:{fontSize:13,color:colors.muted},navActive:{color:colors.accent,fontWeight:'700'},dot:{width:4,height:4,borderRadius:2,marginTop:6},dotActive:{backgroundColor:colors.accent},overlay:{flex:1,backgroundColor:'#0007',justifyContent:'flex-end'},dictionaryOverlay:{flex:1,justifyContent:'flex-end'},dictionaryBackdrop:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'#0007'},dictionarySheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,paddingHorizontal:24,paddingBottom:32,maxHeight:'75%'},dictionaryContent:{gap:20,paddingTop:8,paddingBottom:16},dictionaryLoading:{flexDirection:'row',alignItems:'center',gap:12},dictionaryGroup:{gap:10},dictionaryBody:{fontSize:16,lineHeight:24,color:colors.ink},dictionaryMeta:{fontSize:13,lineHeight:20,color:colors.muted},dictionaryLink:{fontSize:14,color:colors.accent,fontWeight:'600'},sheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,padding:24},input:{minHeight:120,textAlignVertical:'top',backgroundColor:colors.paper,borderRadius:12,padding:16,color:colors.ink,fontSize:16},sheetActions:{flexDirection:'row',justifyContent:'flex-end',gap:12,marginTop:16},button:{paddingVertical:12,paddingHorizontal:18,borderRadius:20},buttonPrimary:{backgroundColor:colors.accent}});
+const createStyles = (colors: Palette) => StyleSheet.create({root:{flex:1,backgroundColor:colors.paper},loading:{flex:1,justifyContent:'center',backgroundColor:colors.paper},header:{paddingHorizontal:16,paddingTop:8,paddingBottom:8,flexDirection:'row',justifyContent:'space-between',alignItems:'center',borderBottomWidth:1,borderColor:colors.line},language:{paddingVertical:10,paddingHorizontal:14,backgroundColor:colors.white,borderRadius:24},languageText:{fontWeight:'600',color:colors.ink},readerBack:{fontSize:34,lineHeight:40,color:colors.ink},playbackStatus:{minHeight:30,alignItems:"center",justifyContent:"center",paddingBottom:6},readerMenuOverlay:{position:"absolute",top:0,right:0,bottom:0,left:0,justifyContent:"flex-end",zIndex:10},readerMenuBackdrop:{position:"absolute",top:0,right:0,bottom:0,left:0,backgroundColor:"#0007"},readerMenuTitle:{fontFamily:"serif",fontSize:22,color:colors.ink,marginBottom:8},readerMenuItem:{flex:1,fontSize:16,fontWeight:"600",color:colors.ink},profileButton:{width:44,height:44,borderRadius:22,alignItems:'center',justifyContent:'center'},profileGlyph:{width:24,height:24,transform:[{scale:0.85}]},profileHead:{position:'absolute',top:1,left:8,width:8,height:8,borderWidth:1.5,borderColor:colors.ink,borderRadius:4},profileShoulders:{position:'absolute',bottom:2,left:3,width:18,height:10,borderWidth:1.5,borderColor:colors.ink,borderTopLeftRadius:10,borderTopRightRadius:10,borderBottomWidth:0},settingsScreen:{flex:1,backgroundColor:colors.paper},settingsNavigationHeader:{minHeight:64,flexDirection:'row',alignItems:'center',paddingHorizontal:16,borderBottomWidth:1,borderColor:colors.line},settingsBackButton:{width:44,height:48,alignItems:'center',justifyContent:'center',marginRight:8},settingsNavigationTitle:{flex:1,fontSize:20,fontWeight:'600',color:colors.ink},settingsList:{paddingHorizontal:24,paddingTop:16,paddingBottom:32},settingsCredits:{paddingTop:24,paddingBottom:16,gap:8},settingsCreditText:{fontSize:13,lineHeight:20,color:colors.muted},settingsCreditLink:{fontSize:13,lineHeight:20,color:colors.accent,textDecorationLine:"underline",alignSelf:"flex-start"},settingsListRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:18,borderBottomWidth:1,borderColor:colors.line},choiceRow:{minHeight:68,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:14,borderBottomWidth:1,borderColor:colors.line},choiceCheck:{fontSize:20,fontWeight:'600',color:colors.accent,minWidth:24,textAlign:'center'},paletteName:{flex:1,fontSize:16,color:colors.ink},paletteSwatches:{flexDirection:'row',gap:6},paletteSwatch:{width:24,height:24,borderRadius:12,borderWidth:1,borderColor:colors.line},colorHints:{gap:10},colorHint:{fontSize:14,lineHeight:21,color:colors.muted},colorHintStrong:{fontWeight:'600',color:colors.ink},settingsHeader:{flexDirection:'row',alignItems:'center',paddingHorizontal:20,paddingVertical:16,borderBottomWidth:1,borderColor:colors.line},settingsTitle:{flex:1,fontFamily:'serif',fontSize:24,color:colors.ink},backIcon:{fontSize:32,color:colors.ink,lineHeight:36},closeIcon:{fontSize:28,color:colors.muted},settingsMenu:{padding:24},settingsMenuRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,padding:20,borderRadius:16,backgroundColor:colors.white},settingsMenuText:{flex:1,gap:6},settingsMenuTitle:{fontSize:16,fontWeight:'600',color:colors.ink},settingsMenuDescription:{fontSize:14,color:colors.muted},settingsChevron:{fontSize:28,color:colors.muted},settingsContent:{gap:32,padding:24},preferenceGroup:{gap:16},preferenceLabel:{fontSize:14,fontWeight:'600',color:colors.ink},sizeOptions:{flexDirection:'row',gap:8},sizeOption:{flex:1,minHeight:88,borderRadius:12,backgroundColor:colors.paper,padding:12,alignItems:'center',justifyContent:'center',gap:8},selectedOption:{backgroundColor:colors.accent},selectedText:{color:colors.onAccent,fontWeight:'600'},sizeSample:{color:colors.ink},optionLabel:{fontSize:13,color:colors.muted},backgroundOption:{flex:1,alignItems:'center',gap:8,minHeight:72},imageSwatch:{overflow:'hidden',backgroundColor:colors.ink},swatchImage:{position:'absolute',width:'100%',height:'100%'},swatchCheck:{color:'#fff',fontSize:20,textShadowColor:'#000',textShadowRadius:4},imagePreview:{height:136,borderRadius:14,overflow:'hidden',justifyContent:'center',alignItems:'center',backgroundColor:'#181818'},imagePreviewText:{fontFamily:'serif',fontSize:20,color:'#fff'},blurHeading:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},blurSlider:{width:'100%',height:44,marginTop:8},blurLabels:{flexDirection:'row',justifyContent:'space-between'},imageHelp:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},imageGrid:{flexDirection:'row',flexWrap:'wrap',gap:10},imageOption:{width:72,height:92,borderRadius:12,overflow:'hidden',borderWidth:2,borderColor:'transparent'},imageOptionSelected:{borderColor:colors.accent},imageThumbnail:{width:'100%',height:'100%'},imageCheck:{position:'absolute',right:4,top:4,width:22,height:22,borderRadius:11,backgroundColor:colors.accent,alignItems:'center',justifyContent:'center'},imageCheckText:{color:colors.onAccent,fontSize:14,fontWeight:'700'},addImages:{alignSelf:'flex-start',paddingVertical:10,paddingHorizontal:16,borderRadius:20,backgroundColor:colors.white},addImagesText:{color:colors.accent,fontWeight:'600'},swatch:{width:48,height:48,borderRadius:24,borderWidth:2,alignItems:'center',justifyContent:'center'},doneButton:{alignItems:'center'},main:{flex:1},fixedBackground:{position:'absolute',top:0,right:0,bottom:0,left:0,overflow:'hidden',backgroundColor:'#181818'},backgroundImage:{width:'100%',height:'100%'},backgroundScrim:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'rgba(0,0,0,0.64)'},transparentPage:{backgroundColor:'transparent'},imagePassage:{color:'#ffffff'},imageReference:{color:'#ffffff'},page:{backgroundColor:colors.paper,paddingHorizontal:28,paddingTop:24,paddingBottom:24},eyebrow:{fontSize:10,fontWeight:'700',letterSpacing:1.6,color:colors.accent},reading:{flex:1},readingContent:{flexGrow:1,justifyContent:'center',paddingVertical:24},passage:{fontSize:26,lineHeight:39,color:colors.ink,fontFamily:'serif'},passageInput:{padding:0,margin:0,textAlignVertical:'top'},referenceGroup:{alignItems:'flex-start',gap:12,flex:1},lookupButton:{maxWidth:'100%',paddingHorizontal:16,paddingVertical:10,borderRadius:20,backgroundColor:colors.white},lookupText:{fontSize:14,fontWeight:'600',color:colors.accent},reference:{fontSize:14,color:colors.muted},pageBottom:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:16},actions:{flexDirection:'column',gap:8},hiddenActions:{opacity:0},action:{width:44,height:44,borderRadius:22,backgroundColor:colors.white,alignItems:'center',justifyContent:'center'},heart:{fontSize:22,color:colors.accent},noteIcon:{fontSize:20,color:colors.ink},section:{flex:1,paddingHorizontal:28,paddingTop:12},title:{fontFamily:'serif',fontSize:32,color:colors.ink,marginTop:8,marginBottom:24},row:{paddingVertical:20,borderBottomWidth:1,borderColor:colors.line,flexDirection:'row',alignItems:'center',gap:16},rowLabel:{fontSize:10,letterSpacing:1,color:colors.accent,fontWeight:'700'},rowTitle:{fontSize:18,lineHeight:26,color:colors.ink,marginTop:8,fontFamily:'serif'},bookDetail:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},chapterProgress:{marginTop:16,gap:8},progressLabels:{flexDirection:'row',justifyContent:'space-between',gap:8},progressText:{fontSize:13,color:colors.muted},progressTrack:{height:4,borderRadius:2,backgroundColor:colors.line,overflow:'hidden'},progressFill:{height:'100%',borderRadius:2,backgroundColor:colors.accent},arrow:{fontSize:22,color:colors.muted},empty:{color:colors.muted,lineHeight:24,marginTop:24},nav:{flexDirection:'row',borderTopWidth:1,borderColor:colors.line,backgroundColor:colors.white,paddingVertical:12},navItem:{flex:1,alignItems:'center',padding:8},navText:{fontSize:13,color:colors.muted},navActive:{color:colors.accent,fontWeight:'700'},dot:{width:4,height:4,borderRadius:2,marginTop:6},dotActive:{backgroundColor:colors.accent},overlay:{flex:1,backgroundColor:'#0007',justifyContent:'flex-end'},dictionaryOverlay:{flex:1,justifyContent:'flex-end'},dictionaryBackdrop:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'#0007'},dictionarySheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,paddingHorizontal:24,paddingBottom:32,maxHeight:'75%'},dictionaryContent:{gap:20,paddingTop:8,paddingBottom:16},dictionaryLoading:{flexDirection:'row',alignItems:'center',gap:12},dictionaryGroup:{gap:10},dictionaryBody:{fontSize:16,lineHeight:24,color:colors.ink},dictionaryMeta:{fontSize:13,lineHeight:20,color:colors.muted},dictionaryLink:{fontSize:14,color:colors.accent,fontWeight:'600'},sheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,padding:24},input:{minHeight:120,textAlignVertical:'top',backgroundColor:colors.paper,borderRadius:12,padding:16,color:colors.ink,fontSize:16},sheetActions:{flexDirection:'row',justifyContent:'flex-end',gap:12,marginTop:16},button:{paddingVertical:12,paddingHorizontal:18,borderRadius:20},buttonPrimary:{backgroundColor:colors.accent}});

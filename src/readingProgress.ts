@@ -1,7 +1,26 @@
-// Keys are scoped to the bundled edition so future books do not share progress.
+// The legacy keys remain readable solely for upgrading existing installations.
 export const CHAPTER_POSITION_PREFIX = 'chapter-position:gita-1972:';
-export const chapterPositionKey = (chapter: number) => `${CHAPTER_POSITION_PREFIX}${chapter}`;
+export const chapterPositionPrefix = (bookId: string) => `chapter-position:${bookId}:`;
+export const chapterPositionKey = (bookId: string, chapter: number) => `${chapterPositionPrefix(bookId)}${chapter}`;
+export const bookPositionKey = (bookId: string) => `book-position:${bookId}`;
 export const SAVE_POSITION_SQL = 'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?), (?, ?)';
+
+/** Copy only valid legacy positions. INSERT OR IGNORE protects already migrated progress. */
+export function legacyGitaPositionCopies(bookId: string, passages: {id: string; chapter: number}[], oldPosition: string | undefined, rows: {key: string; value: string}[]) {
+  const copies: {key: string; value: string}[] = [];
+  for (const row of rows) {
+    const chapter = Number(row.key.slice(CHAPTER_POSITION_PREFIX.length));
+    if (row.key.startsWith(CHAPTER_POSITION_PREFIX) && Number.isInteger(chapter) && passages.some(p => p.chapter === chapter && p.id === row.value)) {
+      copies.push({key:chapterPositionKey(bookId, chapter), value:row.value});
+    }
+  }
+  const last = passages.find(p => p.id === oldPosition);
+  if (last) {
+    copies.push({key:bookPositionKey(bookId), value:last.id});
+    if (!copies.some(row => row.key === chapterPositionKey(bookId, last.chapter))) copies.push({key:chapterPositionKey(bookId, last.chapter), value:last.id});
+  }
+  return copies;
+}
 
 type LocatedPassage = { id: string; chapter: number };
 export function chapterResumeIndex(passages: LocatedPassage[], chapter: number, savedId?: string): number {

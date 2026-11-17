@@ -25,3 +25,8 @@ export function migrateLegacyPassageId(id: string): string | undefined {
   const candidate = `gita-hansi:${chapter}:${verse}`;
   return passages.some(p => p.id === candidate) ? candidate : undefined;
 }
+
+// Each book owns its stable passage IDs and its own chapter list.
+export type Book = { id: string; title: string; shortTitle: string; passages: Passage[]; chapters: {number: number; title: string}[] };
+export const GITA_BOOK_ID = 'gita-hansi';
+export const books: Book[] = [{id:GITA_BOOK_ID, title:'Bhagavad Gita', shortTitle:'Gita', passages, chapters}];
