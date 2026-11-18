@@ -3,14 +3,25 @@ import { Platform } from 'react-native';
 import { findMeanings, validateArchive } from './dictionaryEngine';
 
 const SOURCE = 'https://en-word.net/static/english-wordnet-2025-json.zip';
+export const DICTIONARY_DOWNLOAD_BYTES = 9_986_555;
 function dictionaryFile() { return new File(Paths.document, 'english-wordnet-2025.zip'); }
+let downloading = false;
 export function dictionaryAvailable() { return Platform.OS !== 'web' && dictionaryFile().exists; }
-export async function downloadDictionary() {
+export function removeDictionary() {
+  if (downloading) throw new Error('Wait for the dictionary download to finish.');
+  const file = dictionaryFile();
+  if (file.exists) file.delete();
+}
+export async function downloadDictionary(onProgress?: (fraction: number) => void) {
   if (Platform.OS === 'web') throw new Error('Dictionary downloads are available in the mobile app.');
+  if (downloading) throw new Error('A dictionary download is already in progress.');
+  downloading = true;
   const temp = new File(Paths.document, 'english-wordnet-download.tmp');
-  if (temp.exists) temp.delete();
   try {
-    await File.downloadFileAsync(SOURCE, temp);
+    if (temp.exists) temp.delete();
+    const task = File.createDownloadTask(SOURCE, temp, {onProgress: ({bytesWritten, totalBytes}) => onProgress?.(Math.min(1, bytesWritten / (totalBytes > 0 ? totalBytes : DICTIONARY_DOWNLOAD_BYTES)))});
+    const downloaded = await task.downloadAsync();
+    if (!downloaded) throw new Error('Dictionary download was cancelled.');
     const bytes = await temp.bytes();
     validateArchive(bytes);
     const destination = dictionaryFile();
@@ -19,6 +30,8 @@ export async function downloadDictionary() {
   } catch (error) {
     if (temp.exists) temp.delete();
     throw error;
+  } finally {
+    downloading = false;
   }
 }
 export async function lookupWord(word: string) {

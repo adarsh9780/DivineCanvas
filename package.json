@@ -7,6 +7,7 @@
     "@react-native-community/slider": "5.2.1",
     "expo": "~58.0.20",
     "expo-audio": "~58.0.12",
+    "expo-clipboard": "~58.0.4",
     "expo-constants": "~58.0.13",
     "expo-file-system": "~58.0.13",
     "expo-haptics": "~58.0.7",
@@ -45,7 +46,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
     "test:progress": "node scripts/check-reading-progress.cjs",
-    "postinstall": "patch-package"
+    "test:lookup": "node scripts/check-lookup-gesture.cjs",
+    "test:books": "node scripts/check-itihasa.cjs",
+    "postinstall": "patch-package",
+    "test:book-db": "python3 scripts/check-itihasa-db.py"
   },
   "private": true,
   "expo": {

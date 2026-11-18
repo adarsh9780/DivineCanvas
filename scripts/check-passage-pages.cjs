@@ -1,0 +1,18 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname,'..');
+const ts = require(root + '/node_modules/typescript');
+const source = fs.readFileSync(root + '/src/passagePages.ts','utf8');
+const compiled = ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+const api = {}; new Function('exports',compiled)(api);
+const texts = ['कर्म करो।\n','English translation ', 'continues here.'];
+const text = texts.join('');
+const lines = texts.map((part,i)=>({text:part,y:i*20,height:20}));
+assert.deepEqual(api.measuredPassageSlices(text,lines,100),[{start:0,end:text.length}]);
+const parts = api.measuredPassageSlices(text,lines,40);
+assert.equal(parts.length,2);
+assert.equal(parts.map(p=>text.slice(p.start,p.end)).join(''),text);
+assert.equal(api.measuredPassageSlices(text,[{text:'different',y:0,height:20}],40),null);
+assert.equal(api.measuredPassageSlices(text,lines,0),null);
+console.log('PASS: measured continuation preserves all Unicode text and refuses mismatched native lines.');

@@ -1,5 +1,6 @@
 import { Stack } from 'expo-router';
+import { AppLanguageProvider } from '../AppLanguage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 export default function RootLayout() {
-  return <SafeAreaProvider><Stack screenOptions={{ headerShown: false }} /></SafeAreaProvider>;
+  return <SafeAreaProvider><AppLanguageProvider><Stack screenOptions={{ headerShown: false }}><Stack.Screen name="prashnavali" options={{ gestureEnabled: false }} /></Stack></AppLanguageProvider></SafeAreaProvider>;
 }
