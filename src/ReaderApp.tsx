@@ -1,30 +1,52 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, Linking, Modal, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions } from 'react-native';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, LayoutAnimation, Linking, Modal, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SQLite from 'expo-sqlite';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
+import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { Directory, File, Paths } from 'expo-file-system';
 import { chapterImage, gitaImages } from './bookBackgrounds';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Circle, Path } from 'react-native-svg';
 import { FilterImage } from 'react-native-svg/filter-image';
 import type { Filters } from 'react-native-svg/filter-image';
 import Slider from '@react-native-community/slider';
 import { StatusBar } from 'expo-status-bar';
+import { useRouter } from 'expo-router';
 import { sharePassageImage } from './shareImage';
 import { speechEngines, defaultSpeechEngineId } from './speech';
 import type { GeneratedSpeech, SpeechEngine } from './speech/engine';
 import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
 import { isParadeeInstalled } from './speech/paradee/storage';
-import { dictionaryAvailable, downloadDictionary, lookupWord } from './dictionary';
+import { dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
+import { isDoubleTap, selectedLookupWord, segmentPassage, selectionRange, type Tap, type TextSegment } from './lookupGesture';
 import type { DictionaryMeaning } from './dictionaryEngine';
 import { wordnetNotice } from './dictionaryNotice';
+import { useAppLanguage } from './AppLanguage';
+import { PassageBody } from './PassageBody';
+import { bookDownloads, bookDownloaded, downloadBook, openBookDatabase, removeBookFile } from './bookDownloads';
 import { books, GITA_BOOK_ID, type Book, type Passage, migrateLegacyPassageId } from './book';
 import { CHAPTER_POSITION_PREFIX, chapterPositionPrefix, chapterPositionKey, bookPositionKey, chapterResumeIndex, chapterReadingProgress, legacyGitaPositionCopies, SAVE_POSITION_SQL } from './readingProgress';
 
 import { backgrounds, backgroundLabels, palettes, fontSizes, parseAppearance, Background, ColorTheme, ReadingFontSize, Palette } from './readingAppearance';
+
+const lucideNotice = `ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.`;
 
 function newImageId() { return `user-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`; }
 function newImageSeed() { return Math.floor(Math.random() * 4294967295) || 1; }
@@ -32,9 +54,11 @@ function newImageSeed() { return Math.floor(Math.random() * 4294967295) || 1; }
 type UploadedImage = {id: string; filename: string; thumbFilename?: string};
 type Saved = Record<string, string>;
 type Screen = 'read' | 'chapters' | 'saved' | 'books';
+const EMPTY_CHAPTER_POSITIONS: Record<number, string> = {};
 type NavigationItem = {key: string; title: string; detail: string; idx: number; progress?: {percent: number; label: string}};
 
 function AutoScrollCountdown({seconds, active, finished, colors}: {seconds: number; active: boolean; finished: boolean; colors: Palette}) {
+  const {t} = useAppLanguage();
   const [remaining, setRemaining] = useState(seconds);
   const [progress] = useState(() => new Animated.Value(1));
 
@@ -47,22 +71,26 @@ function AutoScrollCountdown({seconds, active, finished, colors}: {seconds: numb
     return () => { clearInterval(clock); animation.stop(); progress.setValue(1); };
   }, [active, progress, seconds]);
 
-  return <View accessibilityRole="timer" accessibilityLabel={finished ? 'Auto-scroll finished' : active ? `Next passage in ${remaining} seconds` : 'Auto-scroll paused'} style={{minWidth:68,alignItems:'center',gap:5}}>
-    <Text style={{fontSize:13,fontWeight:'600',color:colors.muted,fontVariant:['tabular-nums']}}>{finished ? 'Finished' : active ? `${remaining}s` : 'Paused'}</Text>
+  return <View accessibilityRole="timer" accessibilityLabel={finished ? t("Auto-scroll finished") : active ? (t('Next passage in') + ` ${remaining} ` + t('seconds')) : t("Auto-scroll paused")} style={{minWidth:68,alignItems:'center',gap:5}}>
+    <Text style={{fontSize:13,fontWeight:'600',color:colors.muted,fontVariant:['tabular-nums']}}>{finished ? t("Finished") : active ? `${remaining}${t('s')}` : t("Paused")}</Text>
     <View style={{height:2,width:48,borderRadius:1,backgroundColor:colors.line,overflow:'hidden'}}><Animated.View style={{height:2,width:48,backgroundColor:colors.accent,transform:[{scaleX:active ? progress : 1}]}}/></View>
   </View>;
 }
 
 
 export default function App() {
-  const { height, width } = useWindowDimensions();
+  const {appLanguage, setAppLanguage, t} = useAppLanguage();
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { height, width, fontScale } = useWindowDimensions();
   const list = useRef<FlatList<Passage>>(null);
   const db = useRef<SQLite.SQLiteDatabase | null>(null);
   const [ready, setReady] = useState(false);
   const readerView = useRef<React.ComponentRef<typeof View>>(null);
   const sharing = useRef(false);
   const [sharingId, setSharingId] = useState<string | null>(null);
-  const [settingsPage, setSettingsPage] = useState<'menu' | 'reading' | 'appearance' | 'playback' | 'music' | null>(null);
+  const [settingsPage, setSettingsPage] = useState<'menu' | 'reading' | 'appearance' | 'playback' | 'music' | 'downloads' | 'dictionary' | 'language' | 'credits' | 'privacy' | null>(null);
+  const [showIconLicense, setShowIconLicense] = useState(false);
   const [background, setBackground] = useState<Background>('images');
   const [colorTheme, setColorTheme] = useState<ColorTheme>('paper');
   const [imageSeed, setImageSeed] = useState(1);
@@ -81,12 +109,31 @@ export default function App() {
   const colors = palettes[colorTheme];
   const styles = useMemo(() => createStyles(colors), [colors]);
   const bookImages = useMemo(() => [...gitaImages, ...uploadedImages.map(image => ({id:image.id, source:{uri:new File(Paths.document, 'book-backgrounds', image.filename).uri}, thumbnail:{uri:new File(Paths.document, 'book-backgrounds', image.thumbFilename ?? image.filename).uri}}))], [uploadedImages]);
-  const activeImages = useMemo(() => bookImages.filter(image => selectedImages.includes(image.id)), [bookImages, selectedImages]);
   const [screen, setScreen] = useState<Screen>('books');
+  const [immersive, setImmersive] = useState(false);
+  function changeImmersive(value:boolean) {if (value===immersive) return; LayoutAnimation.easeInEaseOut(); setImmersive(value);}
+  const [pinching, setPinching] = useState(false);
+  const pinch = useRef<{distance:number; triggered:boolean}|null>(null);
+  function pinchDistance(event:GestureResponderEvent) {const touches=event.nativeEvent.touches; return touches.length===2 ? Math.hypot(touches[0].pageX-touches[1].pageX,touches[0].pageY-touches[1].pageY) : null;}
+  function startPinch(event:GestureResponderEvent) {
+    if (screen!=='read' || settingsPage!==null || readerMenuOpen || dictionaryWord!==null) return;
+    const distance=pinchDistance(event); if (distance===null || distance<20) return;
+    pinch.current={distance,triggered:false}; setPinching(true); readerTap.current=null; touchStart.current=null;
+  }
+  function movePinch(event:GestureResponderEvent) {
+    const gesture=pinch.current, distance=pinchDistance(event);
+    if (!gesture || gesture.triggered || distance===null) return;
+    if (distance-gesture.distance > Math.max(35,gesture.distance*0.25)) {gesture.triggered=true; changeImmersive(true);}
+    else if (gesture.distance-distance > Math.max(35,gesture.distance*0.25)) {gesture.triggered=true; changeImmersive(false);}
+  }
+  function finishPinch(event:GestureResponderEvent) {if (event.nativeEvent.touches.length<2) {pinch.current=null; setPinching(false);}}
+  const [sectionMenuOpen, setSectionMenuOpen] = useState(false);
   const [readerMenuOpen, setReaderMenuOpen] = useState(false);
   const [activeBookId, setActiveBookId] = useState(GITA_BOOK_ID);
   const activeBook = books.find(book => book.id === activeBookId) ?? books[0];
   const {passages, chapters} = activeBook;
+  // Until a book has its own image collection, use its approved cover as its background.
+  const activeImages = useMemo(() => activeBook.id === GITA_BOOK_ID ? bookImages.filter(image => selectedImages.includes(image.id)) : [{id:`${activeBook.id}-cover`,source:activeBook.cover,thumbnail:activeBook.cover}], [activeBook, bookImages, selectedImages]);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(false);
   const [autoScrollSeconds, setAutoScrollSeconds] = useState(15);
   const [readAloud, setReadAloud] = useState(false);
@@ -95,12 +142,19 @@ export default function App() {
   const currentIndex = useRef(0);
   const [touchingReader, setTouchingReader] = useState(false);
   const [interactionCount, setInteractionCount] = useState(0);
+  const continuationNavigator = useRef<{advance:()=>boolean; hasMore:()=>boolean} | null>(null);
+  const [continuationPending, setContinuationPending] = useState(false);
+  const registerContinuation = useCallback((navigator:{advance:()=>boolean; hasMore:()=>boolean}|null) => {continuationNavigator.current=navigator; setContinuationPending(!!navigator?.hasMore());}, []);
+  const onContinuationChange = useCallback(() => {setContinuationPending(!!continuationNavigator.current?.hasMore()); setInteractionCount(value => value+1);}, []);
   const speechEngine = useRef<SpeechEngine | null>(null);
   const speechAbort = useRef<AbortController | null>(null);
   const speechFile = useRef<GeneratedSpeech | null>(null);
   const speechDownloadAbort = useRef<AbortController | null>(null);
   const [voiceInstalled, setVoiceInstalled] = useState(() => Platform.OS !== 'web' && isParadeeInstalled());
   const [voiceDownload, setVoiceDownload] = useState<number | null>(null);
+  const [pendingVoiceStart, setPendingVoiceStart] = useState<{bookId:string; passageId:string; language:'en'|'hi'|'sa'; mode:'passage'|'continuous'} | null>(null);
+  const [dictionaryInstalled, setDictionaryInstalled] = useState(() => dictionaryAvailable());
+  const [dictionaryDownload, setDictionaryDownload] = useState<number | null>(null);
   const [narrating, setNarrating] = useState(false);
   const narrationPlayer = useAudioPlayer(null);
   const runtimeAvailable = Platform.OS !== 'web' && !!NativeModules.Onnxruntime;
@@ -133,7 +187,6 @@ export default function App() {
   }, []);
   useEffect(() => {
     // Expo Audio exposes playback configuration through mutable native player properties.
-    // eslint-disable-next-line react-hooks/immutability
     musicPlayer.loop = true;
     musicPlayer.volume = narrating ? musicVolume * 0.5 : musicVolume;
   }, [musicPlayer, musicVolume, narrating]);
@@ -148,19 +201,62 @@ export default function App() {
     }
     return () => { cancelled = true; musicPlayer.pause(); };
   }, [musicPlayer, ready, musicEnabled, appActive, screen, musicStatus.isLoaded, musicFailed, musicAttempt]);
-  const [index, setIndex] = useState(0);
-  const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('hi');
   const [saved, setSaved] = useState<Saved>({});
+  const [index, setIndex] = useState(0);
+  const textDbs = useRef<Record<string,Promise<SQLite.SQLiteDatabase>>>({});
+  const [installedBooks, setInstalledBooks] = useState<Record<string,boolean>>(() => Object.fromEntries(books.map(b => [b.id, bookDownloaded(b.id)])));
+  const [bookInfo, setBookInfo] = useState<Book | null>(null);
+  const [bookDownload, setBookDownload] = useState<{id:string; progress:number} | null>(null);
+  const [textWindow, setTextWindow] = useState<{bookId:string; rows:Record<number,{en:string;sa:string;hi:string}>}>({bookId:'',rows:{}});
+  const [savedText, setSavedText] = useState<Record<string,{en:string;sa:string;hi:string}>>({});
+  const [bookTextError, setBookTextError] = useState(false);
+  const windowRows = textWindow.bookId === activeBookId ? textWindow.rows : {};
+  const currentText = windowRows[index];
+  const currentPassage = useMemo(() => currentText ? {...passages[index], ...currentText} : passages[index], [passages, index, currentText]);
+  const textReady = !!currentText;
+  const getTextDb = useCallback((id:string) => {
+    if (!textDbs.current[id]) textDbs.current[id] = openBookDatabase(id).catch(error => {delete textDbs.current[id]; throw error;});
+    return textDbs.current[id];
+  }, []);
+  useEffect(() => {
+    if (!ready || !installedBooks[activeBookId]) return;
+    let cancelled = false;
+    (async () => {
+      const database = await getTextDb(activeBookId);
+      const rows = await database.getAllAsync<{position:number;en:string;sa:string;hi:string}>('SELECT position, en, sa, hi FROM passages WHERE position BETWEEN ? AND ?', Math.max(0,index-3), index+3);
+      if (!cancelled) {setBookTextError(false); setTextWindow({bookId:activeBookId,rows:Object.fromEntries(rows.map(row => [row.position,{en:row.en,sa:row.sa,hi:row.hi}]))});}
+    })().catch(error => {console.warn('Could not load book text', error); if (!cancelled) setBookTextError(true);});
+    return () => {cancelled = true;};
+  }, [ready, activeBookId, index, installedBooks, getTextDb]);
+  useEffect(() => {
+    if (screen !== 'saved' || !installedBooks[activeBookId]) return;
+    let cancelled = false;
+    const ids = Object.keys(saved).filter(id => id.startsWith(activeBookId + ':'));
+    (async () => {
+      const database = await getTextDb(activeBookId);
+      const found: Record<string,{en:string;sa:string;hi:string}> = {};
+      for (let i=0; i<ids.length; i+=100) {
+        const chunk = ids.slice(i,i+100);
+        const rows = await database.getAllAsync<{id:string;en:string;sa:string;hi:string}>(`SELECT id,en,sa,hi FROM passages WHERE id IN (${chunk.map(() => '?').join(',')})`, chunk);
+        for (const row of rows) found[row.id] = {en:row.en,sa:row.sa,hi:row.hi};
+      }
+      if (!cancelled) setSavedText(found);
+    })().catch(error => console.warn('Could not load saved passage text', error));
+    return () => {cancelled = true;};
+  }, [screen, activeBookId, saved, installedBooks, getTextDb]);
+
+  const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('hi');
   const [positionsByBook, setPositionsByBook] = useState<Record<string, Record<number, string>>>({});
   const [lastByBook, setLastByBook] = useState<Record<string, string>>({});
-  const chapterPositions = positionsByBook[activeBook.id] ?? {};
+  const chapterPositions = positionsByBook[activeBook.id] ?? EMPTY_CHAPTER_POSITIONS;
   const positionWrites = useRef<Promise<void>>(Promise.resolve());
   const [editing, setEditing] = useState<string | null>(null);
   const [note, setNote] = useState('');
-  const selectionInputs = useRef(new Map<string, React.ComponentRef<typeof TextInput>>());
-  const activeSelection = useRef<{passageId: string; start: number; end: number} | null>(null);
-  const touchStart = useRef<{x: number; y: number; time: number; selection: {passageId: string; start: number; end: number}} | null>(null);
-  const [selectedWord, setSelectedWord] = useState<{passageId: string; language: 'en' | 'hi' | 'sa'; word: string} | null>(null);
+  const activeSelection = useRef<{passageId:string; language:'en'|'hi'|'sa'; start:number; end:number; anchorStart:number; anchorEnd:number} | null>(null);
+  const previousWordTap = useRef<Tap | null>(null);
+  const protectSelectionUntil = useRef(0);
+  const touchStart = useRef<{x:number; y:number; time:number; selection:NonNullable<typeof activeSelection.current>} | null>(null);
+  const [selectedWord, setSelectedWord] = useState<typeof activeSelection.current>(null);
   const [dictionaryWord, setDictionaryWord] = useState<string | null>(null);
   const [dictionaryLanguage, setDictionaryLanguage] = useState<'en' | 'hi' | 'sa'>('en');
   const [dictionaryStatus, setDictionaryStatus] = useState<'prompt' | 'loading' | 'results' | 'error' | 'unsupported'>('prompt');
@@ -170,7 +266,6 @@ export default function App() {
   const dictionaryRequest = useRef(0);
   const [dictionaryAnimation] = useState(() => new Animated.Value(0));
   const dictionaryClosing = useRef(false);
-  const [passageHeights, setPassageHeights] = useState<Record<string, number>>({});
   const [readerHeight, setReaderHeight] = useState(Math.max(200, height - 180));
 
   useEffect(() => { (async () => {
@@ -216,13 +311,15 @@ export default function App() {
         const prefix = chapterPositionPrefix(book.id);
         const chapterRows = await database.getAllAsync<{key: string; value: string}>('SELECT key, value FROM settings WHERE key LIKE ?', `${prefix}%`);
         const positions: Record<number, string> = {};
+        const position = await database.getFirstAsync<{value: string}>('SELECT value FROM settings WHERE key = ?', bookPositionKey(book.id));
+        // Don't load a large book when it has never been opened. Index a read book once.
+        const byId = chapterRows.length || position ? new Map(book.passages.map(p => [p.id, p.chapter])) : null;
         for (const row of chapterRows) {
           const chapter = Number(row.key.slice(prefix.length));
-          if (book.passages.some(p => p.chapter === chapter && p.id === row.value)) positions[chapter] = row.value;
+          if (byId?.get(row.value) === chapter) positions[chapter] = row.value;
         }
         allPositions[book.id] = positions;
-        const position = await database.getFirstAsync<{value: string}>('SELECT value FROM settings WHERE key = ?', bookPositionKey(book.id));
-        if (position && book.passages.some(p => p.id === position.value)) allLast[book.id] = position.value;
+        if (position && byId?.has(position.value)) allLast[book.id] = position.value;
       }
       setPositionsByBook(allPositions);
       setLastByBook(allLast);
@@ -230,7 +327,8 @@ export default function App() {
       const last = selectedBook.passages.findIndex(p => p.id === allLast[selectedBook.id]);
       if (last >= 0) { currentIndex.current = last; setIndex(last); }
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
-      if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(lang.value);
+      if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
+      else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
       const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
@@ -260,26 +358,26 @@ export default function App() {
         await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', 'gita-backgrounds', JSON.stringify({seed, selected:gitaImages.map(image => image.id), uploaded:[]}));
       }
       setReady(true);
-    } catch { Alert.alert('Unable to open local storage', 'Please restart the app and try again.'); }
-  })(); }, []);
+    } catch { Alert.alert(t("Unable to open local storage"), t("Please restart the app and try again.")); }
+  })(); }, [t]);
 
-  async function setting(key: string, value: string) { await db.current?.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', key, value); }
+  const setting = useCallback(async (key: string, value: string) => { await db.current?.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', key, value); }, []);
   const preferenceWrites = useRef<Promise<void>>(Promise.resolve());
-  function savePreference(key: string, value: string) {
+  const savePreference = useCallback((key: string, value: string) => {
     preferenceWrites.current = preferenceWrites.current.then(() => setting(key, value))
-      .catch(() => Alert.alert('Setting could not be saved', 'Please try selecting it again.'));
-  }
+      .catch(() => Alert.alert(t("Setting could not be saved"), t("Please try selecting it again.")));
+  }, [setting, t]);
   function saveImagePreferences(selected: string[], uploaded: UploadedImage[]) {
     savePreference('gita-backgrounds', JSON.stringify({seed:imageSeed, selected, uploaded}));
   }
   function toggleImage(id: string) {
     const next = selectedImages.includes(id) ? selectedImages.filter(value => value !== id) : [...selectedImages, id];
-    if (!next.length) { Alert.alert('Choose an image', 'Keep at least one image selected.'); return; }
+    if (!next.length) { Alert.alert(t("Choose an image"), t("Keep at least one image selected.")); return; }
     setSelectedImages(next); saveImagePreferences(next, uploadedImages);
   }
   async function addImages() {
     if (addingImages) return;
-    if (Platform.OS === 'web') { Alert.alert('Use the mobile app', 'Adding your own images is available on iPhone and Android.'); return; }
+    if (Platform.OS === 'web') { Alert.alert(t("Use the mobile app"), t("Adding your own images is available on iPhone and Android.")); return; }
     setAddingImages(true);
     const copied: File[] = [];
     try {
@@ -318,7 +416,7 @@ export default function App() {
       setUploadedImages(nextUploaded); setSelectedImages(nextSelected); saveImagePreferences(nextSelected, nextUploaded);
     } catch {
       for (const file of copied) { try { if (file.exists) file.delete(); } catch { /* Ignore cleanup errors. */ } }
-      Alert.alert('Could not add images', 'Please try choosing your photos again.');
+      Alert.alert(t("Could not add images"), t("Please try choosing your photos again."));
     } finally { setAddingImages(false); }
   }
   async function toggle(p: Passage) {
@@ -341,16 +439,18 @@ export default function App() {
     const passage = book.passages[i];
     const database = db.current;
     if (!passage || !database) return;
+    const previousIndex = currentIndex.current;
     currentIndex.current = i;
+    if (i !== previousIndex) { activeSelection.current = null; setSelectedWord(null); }
+    previousWordTap.current = null;
     setIndex(i);
-    setSelectedWord(null);
     setPositionsByBook(current => ({...current, [book.id]: {...current[book.id], [passage.chapter]: passage.id}}));
     setLastByBook(current => ({...current, [book.id]: passage.id}));
     // Keep rapid swipes in order; both positions are saved in one atomic statement.
     positionWrites.current = positionWrites.current.then(async () => {
       await database.runAsync(SAVE_POSITION_SQL, bookPositionKey(book.id), passage.id, chapterPositionKey(book.id, passage.chapter), passage.id);
-    }).catch(() => Alert.alert('Reading position could not be saved', 'Please try opening this passage again.'));
-  }, [activeBookId]);
+    }).catch(() => Alert.alert(t("Reading position could not be saved"), t("Please try opening this passage again.")));
+  }, [activeBookId, setSelectedWord, t]);
   async function sharePassage(passage: Passage) {
     if (sharing.current) return;
     const view = readerView.current;
@@ -362,7 +462,7 @@ export default function App() {
       await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
       await sharePassageImage(view, `${passage.id.replace(/[^a-z0-9-]/gi, '-')}.png`);
     } catch {
-      Alert.alert('Could not share this passage', 'Please try again.');
+      Alert.alert(t("Could not share this passage"), t("Please try again."));
     } finally {
       sharing.current = false;
       setSharingId(null);
@@ -383,22 +483,56 @@ export default function App() {
   async function showWord(word: string, lang: 'en' | 'hi' | 'sa', download = false) {
     if (dictionaryClosing.current) return;
     const request = ++dictionaryRequest.current;
-    setDictionaryWord(word); setDictionaryLanguage(lang); setShowDictionaryLicense(false);
+    setDictionaryWord(word); setDictionaryLanguage(lang);
     if (lang !== 'en' || Platform.OS === 'web') { setDictionaryStatus('unsupported'); return; }
     if (!download && !dictionaryAvailable()) { setDictionaryStatus('prompt'); return; }
     setDictionaryStatus('loading');
     try {
-      if (download) await downloadDictionary();
+      if (download) {
+        setDictionaryDownload(0);
+        try { await downloadDictionary(setDictionaryDownload); setDictionaryInstalled(true); }
+        finally { setDictionaryDownload(null); }
+      }
       // Let the loading indicator render before processing the downloaded archive.
       await new Promise<void>(resolve => setTimeout(resolve, 50));
       const result = await lookupWord(word);
       if (request === dictionaryRequest.current) { setMeanings(result); setDictionaryStatus('results'); }
     } catch {
       if (request === dictionaryRequest.current) {
-        setDictionaryError(download ? 'Download failed. Check your connection and try again.' : 'Could not open the dictionary. Please try again.');
+        setDictionaryError(download ? (appLanguage === 'hi' ? 'डाउनलोड नहीं हो सका। इंटरनेट जाँचकर फिर प्रयास करें।' : 'Download failed. Check your connection and try again.') : (appLanguage === 'hi' ? 'शब्दकोश नहीं खुल सका। कृपया फिर प्रयास करें।' : 'Could not open the dictionary. Please try again.'));
         setDictionaryStatus('error');
       }
     }
+  }
+  function selectPassageWord(passage: Passage, segment: TextSegment, x: number, y: number, time: number) {
+    protectSelectionUntil.current = time + 500;
+    const nextTap = {time, x, y, passageId:`${passage.id}:${segment.start}`};
+    const doubled = isDoubleTap(previousWordTap.current, nextTap);
+    previousWordTap.current = doubled ? null : nextTap;
+    const previous = activeSelection.current;
+    if (doubled) {
+      const next = {passageId:passage.id, language, start:segment.start, end:segment.end, anchorStart:segment.start, anchorEnd:segment.end};
+      activeSelection.current = next;
+      setSelectedWord(next);
+      void Haptics.selectionAsync().catch(() => {});
+      const word = selectedLookupWord(passage[language], segment.start, segment.end);
+      if (word) void showWord(word, language);
+    } else if (previous?.passageId === passage.id && previous.language === language) {
+      const next = {...previous, ...selectionRange(previous.anchorStart, previous.anchorEnd, segment.start, segment.end)};
+      activeSelection.current = next;
+      setSelectedWord(next);
+    }
+  }
+  async function copySelection(passage: Passage, time: number) {
+    const selection = activeSelection.current;
+    if (!selection || selection.passageId !== passage.id) return;
+    protectSelectionUntil.current = time + 500;
+    try {
+      const copied = await Clipboard.setStringAsync(passage[selection.language].slice(selection.start, selection.end));
+      if (copied === false) throw new Error('Clipboard unavailable');
+      activeSelection.current = null;
+      setSelectedWord(null);
+    } catch { Alert.alert(t("Could not copy text"), t("Please try again.")); }
   }
   const stopNarration = useCallback(() => {
     speechAbort.current?.abort(); speechAbort.current = null;
@@ -430,11 +564,11 @@ export default function App() {
         }
       } else if (status.error && speechAbort.current) {
         stopReadAloud();
-        Alert.alert('Could not play narration', status.error);
+        Alert.alert(t("Could not play narration"), status.error);
       }
     });
     return () => subscription.remove();
-  }, [narrationPlayer, passages, rememberPosition, stopNarration, stopReadAloud]);
+  }, [narrationPlayer, passages, rememberPosition, stopNarration, stopReadAloud, t]);
 
   useEffect(() => () => { stopNarration(); }, [index, language, screen, appActive, stopNarration]);
 
@@ -442,32 +576,56 @@ export default function App() {
     if (!speechEngine.current) speechEngine.current = await speechEngines.create(defaultSpeechEngineId);
     return speechEngine.current;
   }, []);
-  async function downloadVoice() {
-    if (!runtimeAvailable) {Alert.alert('Development build needed', 'This voice requires an app build with the speech runtime. Expo Go cannot run it.'); return;}
-    if (voiceDownload !== null) return;
+  const downloadVoice = useCallback(async () => {
+    if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
+    if (speechDownloadAbort.current) return;
     const controller = new AbortController(); speechDownloadAbort.current = controller; setVoiceDownload(0);
     try {
       const engine = await getSpeechEngine();
       await engine.install({signal:controller.signal,onProgress:progress=>setVoiceDownload(Math.min(1,progress.completedBytes/(progress.totalBytes ?? PARADEE_DOWNLOAD_BYTES)))});
-      setVoiceInstalled(true);
-    } catch (error) {if (!controller.signal.aborted) Alert.alert('Voice download failed', error instanceof Error ? error.message : 'Please try again.');}
-    finally {speechDownloadAbort.current = null; setVoiceDownload(null);}
+      if (!controller.signal.aborted) setVoiceInstalled(true);
+    } catch (error) {
+      setPendingVoiceStart(null);
+      if (!controller.signal.aborted) Alert.alert(t("Voice download failed"), error instanceof Error ? error.message : t("Please try again."));
+    } finally {speechDownloadAbort.current = null; setVoiceDownload(null);}
+  }, [getSpeechEngine, runtimeAvailable, t]);
+
+  const requestVoice = useCallback((passage: Passage, mode: 'passage' | 'continuous') => {
+    if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("The offline voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
+    if (speechDownloadAbort.current) {Alert.alert(t("Download in progress"), t("The reading voice is already downloading.")); return;}
+    Alert.alert(t("Download offline voice?"), t("Download the reading voice once (about 11 MB). It will work offline after installation."), [
+      {text:t("Not now"), style:'cancel'},
+      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:activeBookId, passageId:passage.id, language, mode}); void downloadVoice();}},
+    ]);
+  }, [activeBookId, downloadVoice, language, runtimeAvailable, t]);
+
+  function cancelVoiceDownload() {setPendingVoiceStart(null); speechDownloadAbort.current?.abort();}
+  function deleteDictionary() {
+    try {removeDictionary(); setDictionaryInstalled(false);}
+    catch (error) {Alert.alert(t("Could not remove dictionary"), error instanceof Error ? error.message : t("Please try again."));}
+  }
+  async function installDictionaryFromSettings() {
+    if (dictionaryDownload !== null || dictionaryInstalled) return;
+    setDictionaryDownload(0);
+    try { await downloadDictionary(setDictionaryDownload); setDictionaryInstalled(true); }
+    catch (error) { Alert.alert(t("Dictionary download failed"), error instanceof Error ? error.message : t("Please try again.")); }
+    finally { setDictionaryDownload(null); }
   }
   async function removeVoice() {
     try {stopReadAloud(); const engine=await getSpeechEngine(); await engine.uninstall(); setVoiceInstalled(false);}
-    catch (error) {Alert.alert('Could not remove voice', error instanceof Error ? error.message : 'Please try again.');}
+    catch (error) {Alert.alert(t("Could not remove voice"), error instanceof Error ? error.message : t("Please try again."));}
   }
   const startNarration = useCallback(async (passage: Passage) => {
     if (!runtimeAvailable || !voiceInstalled) {
       stopReadAloud();
-      Alert.alert(!runtimeAvailable ? 'Development build needed' : 'Download a voice', !runtimeAvailable ? 'This voice requires an app build with the speech runtime. Expo Go cannot run it.' : 'Open Settings and download the reading voice first.');
+      requestVoice(passage, 'passage');
       return;
     }
     const controller=new AbortController(); speechAbort.current=controller; setNarrating(true);
     try {
       const engine=await getSpeechEngine();
       const voice = engine.info.voices.find(candidate => candidate.languages.includes(language));
-      if (!voice) throw new Error('No voice is available for this language.');
+      if (!voice) throw new Error(t("No voice is available for this language."));
       const result=await engine.synthesize({text:passage[language],language,voiceId:voice.id},controller.signal);
       if (controller.signal.aborted) {await result.dispose(); return;}
       speechFile.current=result;
@@ -477,21 +635,37 @@ export default function App() {
     } catch(error) {
       if (!controller.signal.aborted) {
         stopReadAloud();
-        Alert.alert('Could not read this passage', error instanceof Error ? error.message : 'Please try again.');
+        Alert.alert(t("Could not read this passage"), error instanceof Error ? error.message : t("Please try again."));
       }
     }
-  }, [getSpeechEngine, language, narrationPlayer, runtimeAvailable, stopReadAloud, voiceInstalled]);
+  }, [getSpeechEngine, language, narrationPlayer, runtimeAvailable, stopReadAloud, voiceInstalled, requestVoice, t]);
 
   useEffect(() => {
-    if (!readAloud || !ready || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null) return;
-    const timer = setTimeout(() => { void startNarration(passages[index]); }, 0);
+    if (!pendingVoiceStart || !voiceInstalled || voiceDownload !== null || !textReady) return;
+    const timer = setTimeout(() => {
+      setPendingVoiceStart(null);
+      if (screen !== 'read' || activeBookId !== pendingVoiceStart.bookId || passages[index]?.id !== pendingVoiceStart.passageId || language !== pendingVoiceStart.language) return;
+      if (pendingVoiceStart.mode === 'continuous') {
+        if (autoScrollEnabled) {setAutoScrollEnabled(false); savePreference('auto-scroll-enabled', 'false');}
+        readAloudRef.current = true;
+        setReadAloud(true);
+      } else if (settingsPage === null && !readerMenuOpen && appActive) {
+        void startNarration(currentPassage);
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [pendingVoiceStart, voiceInstalled, voiceDownload, screen, activeBookId, passages, index, language, settingsPage, readerMenuOpen, appActive, currentPassage, textReady, startNarration, autoScrollEnabled, savePreference]);
+
+  useEffect(() => {
+    if (!readAloud || !ready || !textReady || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null) return;
+    const timer = setTimeout(() => { void startNarration(currentPassage); }, 0);
     return () => { clearTimeout(timer); stopNarration(); };
-  }, [readAloud, ready, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, index, passages, startNarration, stopNarration]);
+  }, [readAloud, ready, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, index, passages, currentPassage, textReady, startNarration, stopNarration]);
 
   function toggleReadAloud(value: boolean) {
     if (!value) { stopReadAloud(); return; }
     if (!runtimeAvailable || !voiceInstalled) {
-      Alert.alert(!runtimeAvailable ? 'Development build needed' : 'Download a voice', !runtimeAvailable ? 'Read aloud requires an app build with the speech runtime.' : 'Download the reading voice below to use Read aloud.');
+      requestVoice(currentPassage, 'continuous');
       return;
     }
     stopNarration();
@@ -502,37 +676,81 @@ export default function App() {
   useEffect(() => () => { speechDownloadAbort.current?.abort(); speechAbort.current?.abort(); const engine=speechEngine.current; if (engine) void engine.dispose(); }, []);
 
   useEffect(() => {
-    if (!ready || !autoScrollEnabled || readAloud || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || index >= passages.length - 1) return;
+    if (!ready || !textReady || !autoScrollEnabled || readAloud || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || (index >= passages.length - 1 && !continuationPending)) return;
     const timer = setTimeout(() => {
+      if (continuationNavigator.current?.advance()) return;
       const next = index + 1;
       if (!list.current) return;
       list.current.scrollToIndex({index:next, animated:true});
       rememberPosition(next);
     }, autoScrollSeconds * 1000);
     return () => clearTimeout(timer);
-  }, [ready, autoScrollEnabled, readAloud, autoScrollSeconds, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, selectedWord, narrating, touchingReader, index, interactionCount, rememberPosition, passages.length]);
+  }, [ready, autoScrollEnabled, readAloud, autoScrollSeconds, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, selectedWord, narrating, touchingReader, index, interactionCount, rememberPosition, passages.length, textReady, continuationPending]);
 
   function jump(i: number) { if (i < 0) return; rememberPosition(i); setScreen('read'); }
-  function openBook(book: Book) {
+  function openBook(book: Book, justDownloaded = false) {
+    if (!justDownloaded && !installedBooks[book.id]) {void installBook(book); return;}
     stopReadAloud();
     const resume = book.passages.findIndex(p => p.id === lastByBook[book.id]);
     const next = Math.max(0, resume);
     currentIndex.current = next;
+    activeSelection.current = null;
     setSelectedWord(null);
     setActiveBookId(book.id);
+    if (!book.languages.includes(language)) setLanguage(book.languages[0]);
     setIndex(next);
     setScreen('read');
     savePreference('active-book', book.id);
   }
-  const autoScrollFinished = index >= passages.length - 1;
+  async function installBook(book:Book) {
+    if (bookDownload) {Alert.alert(t("Download in progress"), t("Please wait for the current book to finish downloading.")); return;}
+    setBookDownload({id:book.id,progress:0});
+    try {
+      await downloadBook(book.id, progress => setBookDownload({id:book.id,progress}));
+      setInstalledBooks(current => ({...current,[book.id]:true}));
+
+    } catch (error) {Alert.alert(t("Download failed"), error instanceof Error ? error.message : t("Check your connection and try again."));}
+    finally {setBookDownload(null);}
+  }
+  function confirmRemoveBook(book:Book) {
+    Alert.alert(t("Remove download?"), appLanguage === 'hi' ? `आप ${t(book.title)} फिर से डाउनलोड कर सकते हैं। पढ़ने की स्थिति और नोट्स इस डिवाइस पर रहेंगे।` : `You can download ${book.title} again. Your reading progress and notes will stay on this device.`, [
+      {text:t("Cancel"),style:'cancel'},
+      {text:t("Remove download"),style:'destructive',onPress:() => { void (async () => {
+        try {
+          const promise=textDbs.current[book.id]; delete textDbs.current[book.id];
+          if (promise) await (await promise).closeAsync();
+          removeBookFile(book.id);
+          setInstalledBooks(current => ({...current,[book.id]:false}));
+          setTextWindow({bookId:'',rows:{}});
+        } catch {Alert.alert(t("Could not remove download"), t("Please try again."));}
+      })();}},
+    ]);
+  }
+  const localChapter = useCallback((title:string) => appLanguage === 'hi' ? t(title).replace(/Vol\. ([IVX]+) · Chapter (.+)/, 'खंड $1 · अध्याय $2') : title, [appLanguage,t]);
+  const localProgress = useCallback((label:string) => {
+    if (appLanguage !== 'hi') return label;
+    return label.replace(/^Not started · (\d+) (?:verses|passages)$/, (_m,n) => `आरंभ नहीं किया · ${n} ${activeBook.progressUnit === 'verse' ? 'श्लोक' : 'अंश'}`)
+      .replace(/^(?:Verses?|Passages?) ([\d–]+) of (\d+)$/, (_m,n,total) => `${activeBook.progressUnit === 'verse' ? 'श्लोक' : 'अंश'} ${n} / ${total}`);
+  }, [appLanguage,activeBook.progressUnit]);
+  const chapterItems = useMemo(() => chapters.map(c => ({
+    key: String(c.number), title: localChapter(c.title), detail: c.detail ? (appLanguage === 'hi' ? c.detail.replace(/VOLUME ([IVX]+) · ENTRY (\d+)/, 'खंड $1 · प्रविष्टि $2') : c.detail) : `${appLanguage === 'hi' ? 'अध्याय' : 'CHAPTER'} ${String(c.number).padStart(2, '0')}`,
+    progress: (() => {const result=chapterReadingProgress(passages, c.number, chapterPositions[c.number], activeBook.progressUnit); return {...result,label:localProgress(result.label)};})(),
+    idx: chapterResumeIndex(passages, c.number, chapterPositions[c.number]),
+  })), [chapters, passages, chapterPositions, activeBook.progressUnit, appLanguage, localChapter, localProgress]);
+  const useBookImages = background === 'images';
+  const autoScrollFinished = index >= passages.length - 1 && !continuationPending;
   const autoScrollRunning = ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
   if (!ready) return <View style={styles.loading}><ActivityIndicator color={colors.accent}/></View>;
-  return <SafeAreaView style={styles.root}
+  return <SafeAreaView style={styles.root} edges={screen === 'read' ? (immersive ? ['left','right'] : ['top','left','right']) : undefined}
+    onTouchStartCapture={startPinch}
+    onTouchMoveCapture={movePinch}
+    onTouchEndCapture={finishPinch}
+    onTouchCancelCapture={finishPinch}
     onTouchCancel={() => {setTouchingReader(false); setInteractionCount(count => count + 1);}}
     onTouchStart={event => {
       setTouchingReader(true);
       const selection = activeSelection.current;
-      touchStart.current = selection ? {x:event.nativeEvent.pageX,y:event.nativeEvent.pageY,time:Date.now(),selection} : null;
+      touchStart.current = event.nativeEvent.touches.length===1 && selection && screen === 'read' && settingsPage === null && !readerMenuOpen && dictionaryWord === null ? {x:event.nativeEvent.pageX,y:event.nativeEvent.pageY,time:Date.now(),selection} : null;
     }}
     onTouchEnd={event => {
       setTouchingReader(false);
@@ -540,207 +758,275 @@ export default function App() {
       const start = touchStart.current;
       touchStart.current = null;
       if (!start || Date.now() - start.time > 350 || Math.hypot(event.nativeEvent.pageX - start.x, event.nativeEvent.pageY - start.y) > 12) return;
-      // Let buttons and the system's text menu receive their tap first.
+      // Let word and toolbar presses protect their selection before clearing an outside tap.
       setTimeout(() => {
-        const current = activeSelection.current;
-        if (current && (current.passageId !== start.selection.passageId || current.start !== start.selection.start || current.end !== start.selection.end)) return;
-        const input = selectionInputs.current.get(start.selection.passageId);
-        input?.setSelection(start.selection.end, start.selection.end);
-        input?.blur();
+        if (Date.now() < protectSelectionUntil.current || activeSelection.current !== start.selection) return;
         activeSelection.current = null;
         setSelectedWord(null);
       }, 0);
-    }}><StatusBar style={colors.dark ? "light" : "dark"} />
-    {screen === 'read' ? <>
+    }}><StatusBar animated hidden={screen === 'read' && immersive} style={colors.dark ? "light" : "dark"} />
+    {!(screen === 'read' && immersive) && voiceDownload !== null && <View accessibilityRole="progressbar" accessibilityLabel={t("Downloading reading voice")} accessibilityValue={{min:0,max:100,now:Math.round(voiceDownload*100)}} style={styles.downloadBanner}><ActivityIndicator color={colors.accent}/><Text style={styles.downloadBannerText}>{t("Downloading voice ·")} {Math.round(voiceDownload*100)}%</Text><Pressable accessibilityRole="button" onPress={cancelVoiceDownload}><Text style={styles.downloadCancel}>{t("Cancel")}</Text></Pressable></View>}
+    {!(screen === 'read' && immersive) && dictionaryDownload !== null && dictionaryWord === null && <View accessibilityRole="progressbar" accessibilityLabel={t("Downloading English dictionary")} accessibilityValue={{min:0,max:100,now:Math.round(dictionaryDownload*100)}} style={styles.downloadBanner}><ActivityIndicator color={colors.accent}/><Text style={styles.downloadBannerText}>{t("Downloading dictionary ·")} {Math.round(dictionaryDownload*100)}%</Text></View>}
+    {screen === 'read' ? <>{!immersive && <>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back to books" onPress={() => setScreen('books')} style={styles.profileButton}><Text style={styles.readerBack}>‹</Text></Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Chapters" onPress={() => setScreen('chapters')} style={styles.profileButton}>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("Back to books")} onPress={() => {setImmersive(false); setScreen('books');}} style={styles.profileButton}><Text style={styles.readerBack}>‹</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("Chapters")} onPress={() => setScreen('chapters')} style={styles.profileButton}>
           <Svg width={23} height={23} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M4 6h2M4 12h2M4 18h2M10 6h10M10 12h10M10 18h10"/></Svg>
         </Pressable>
         <View style={{flex:1}}/>
-        <Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? 'Loading reading music' : musicFailed && musicEnabled ? 'Music unavailable. Tap to retry' : musicEnabled ? 'Mute reading music' : 'Unmute reading music'} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Switch between English, Hindi and Sanskrit" onPress={() => { const next = language === 'en' ? 'hi' : language === 'hi' ? 'sa' : 'en'; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? 'English ▾' : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Book menu" accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage === 'hi' ? 'पाठ की भाषा बदलें। वर्तमान:' : 'Switch reading language. Current:'} ${language === 'en' ? t("English") : language === 'hi' ? t("Hindi") : t("Sanskrit")}`} onPress={() => { activeSelection.current = null; setSelectedWord(null); previousWordTap.current = null; const next = activeBook.languages[(activeBook.languages.indexOf(language) + 1) % activeBook.languages.length]; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? t("English ▾") : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable>
       </View>
-      {readAloud ? <Pressable accessibilityRole="button" accessibilityLabel="Stop read aloud" onPress={stopReadAloud} style={styles.playbackStatus}><Text style={styles.settingsMenuDescription}>Reading aloud · tap to stop</Text></Pressable> : autoScrollEnabled && <View style={styles.playbackStatus}><AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/></View>}
-    </> : <View style={styles.settingsNavigationHeader}>
-      {screen !== 'books' && <Pressable accessibilityRole="button" accessibilityLabel="Back to reader" onPress={() => setScreen('read')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>}
-      <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{screen === 'books' ? 'Books' : screen === 'chapters' ? 'Chapters' : 'Saved passages'}</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel="Open settings" onPress={() => setSettingsPage('menu')} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round"><Path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7ZM19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06-1.8 3.12-.08-.02a1.7 1.7 0 0 0-1.79.63l-.05.07h-3.6l-.04-.07a1.7 1.7 0 0 0-1.8-.63l-.08.02-1.8-3.12.06-.06A1.7 1.7 0 0 0 9.16 15l-.08-.03-1.8-3.12.05-.07a1.7 1.7 0 0 0 0-1.87l-.05-.07 1.8-3.12.08.02a1.7 1.7 0 0 0 1.8-.63l.04-.07h3.6l.05.07a1.7 1.7 0 0 0 1.79.63l.08-.02 1.8 3.12-.06.06a1.7 1.7 0 0 0-.34 1.87l.08.04v3.6l-.08.03Z" transform="translate(-2.3 0)"/></Svg></Pressable>
+      {readAloud ? <Pressable accessibilityRole="button" accessibilityLabel={t("Stop read aloud")} onPress={stopReadAloud} style={styles.playbackStatus}><Text style={styles.settingsMenuDescription}>{t("Reading aloud · tap to stop")}</Text></Pressable> : autoScrollEnabled && <View style={styles.playbackStatus}><AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/></View>}
+    </>}</> : <View style={styles.settingsNavigationHeader}>
+      {screen !== 'books' && <Pressable accessibilityRole="button" accessibilityLabel={t("Back to reader")} onPress={() => setScreen('read')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>}
+      {screen === 'books' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Choose section, current section Books")} accessibilityState={{expanded:sectionMenuOpen}} onPress={() => setSectionMenuOpen(true)} style={{flex:1,flexDirection:'row',alignItems:'center',gap:8,minHeight:48}}><Text style={[styles.settingsNavigationTitle,{flex:0}]}>{t("Books")}</Text><Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><Path d="m6 9 6 6 6-6"/></Svg></Pressable> : <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{screen === 'chapters' ? t("Chapters") : t("Saved passages")}</Text>}
+      <Pressable accessibilityRole="button" accessibilityLabel={t("Open settings")} onPress={() => setSettingsPage('menu')} style={styles.profileButton}><Svg width={23} height={23} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><Circle cx={12} cy={12} r={3}/></Svg></Pressable>
     </View>}
     <View ref={readerView} collapsable={false} style={styles.main} onLayout={e => setReaderHeight(e.nativeEvent.layout.height)}
-      onTouchStart={event => { readerTap.current = readAloudRef.current && screen === 'read' && settingsPage === null ? {x:event.nativeEvent.pageX, y:event.nativeEvent.pageY, time:Date.now()} : null; }}
+      onTouchStart={event => { readerTap.current = event.nativeEvent.touches.length===1 && readAloudRef.current && screen === 'read' && settingsPage === null ? {x:event.nativeEvent.pageX, y:event.nativeEvent.pageY, time:Date.now()} : null; }}
       onTouchCancel={() => { readerTap.current = null; }}
       onTouchEnd={event => {
         const tap = readerTap.current;
         readerTap.current = null;
         if (tap && Date.now() - tap.time <= 350 && Math.hypot(event.nativeEvent.pageX - tap.x, event.nativeEvent.pageY - tap.y) <= 12) stopReadAloud();
       }}>
-      {screen === 'read' && background === 'images' && activeImages.length > 0 && <View pointerEvents="none" style={styles.fixedBackground}><FilterImage source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" filters={imageFilters}/><View style={styles.backgroundScrim}/></View>}
-      {screen === 'read' ? <FlatList key={`${activeBook.id}-${readerHeight}-${width}`} ref={list} data={passages} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item}) => <View style={[styles.page, background === 'images' && styles.transparentPage, {height: readerHeight}]}>
+      {screen === 'read' && useBookImages && activeImages.length > 0 && <View pointerEvents="none" style={styles.fixedBackground}>
+        <Image source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" />
+        {imageFilters.length > 0 && <FilterImage key={`${width}-${readerHeight}`} source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.filteredBackgroundImage} resizeMode="cover" filters={imageFilters}/>}
+        <View style={styles.backgroundScrim}/>
+      </View>}
+      {screen === 'read' ? <FlatList key={`${activeBook.id}-${readerHeight}-${width}`} ref={list} data={passages} extraData={textWindow} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null && !pinching} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item:metadata, index:rowIndex}) => { const loaded = windowRows[rowIndex] ? {...metadata,...windowRows[rowIndex]} : metadata; const item = loaded; const loading = !windowRows[rowIndex]; return <View style={[styles.page, useBookImages && styles.transparentPage, {height: readerHeight,paddingTop:immersive ? Math.max(24,insets.top+12) : 24,paddingBottom:Math.max(24,insets.bottom+12)}]}>
+        {loading && <View style={{position:'absolute',alignSelf:'center',top:'45%'}}>{bookTextError ? <Text style={{color:colors.muted}}>{t("Could not load this passage. Please reopen the book.")}</Text> : <ActivityIndicator color={colors.accent}/>}</View>}
 
-        <ScrollView style={styles.reading} contentContainerStyle={styles.readingContent}><TextInput
-          accessibilityLabel="Passage text"
-          key={`${item.id}-${language}-${fontSize}-${width}`}
-          onContentSizeChange={({nativeEvent: {contentSize}}) => {
-            const key = `${item.id}-${language}-${fontSize}-${width}`;
-            const height = Math.ceil(contentSize.height);
-            setPassageHeights(current => current[key] === height ? current : {...current, [key]:height});
-          }}
-          ref={input => { if (input) selectionInputs.current.set(item.id, input); else selectionInputs.current.delete(item.id); }}
-          multiline
-          value={item[language]}
-          showSoftInputOnFocus={false}
-          caretHidden
-          scrollEnabled={false}
-          underlineColorAndroid="transparent"
-          autoCorrect={false}
-          spellCheck={false}
-          onSelectionChange={({nativeEvent: {selection}}) => {
-            const previous = activeSelection.current;
-            if (selection.start !== selection.end) {
-              if (!previous || previous.passageId !== item.id) void Haptics.selectionAsync().catch(() => {});
-              activeSelection.current = {passageId:item.id, start:selection.start, end:selection.end};
-            } else if (previous?.passageId === item.id) {
-              activeSelection.current = null;
-            }
-            const selected = item[language].slice(selection.start, selection.end).trim();
-            const word = selected.replace(/^[^\p{L}\p{M}]+|[^\p{L}\p{M}]+$/gu, '');
-            if (/^[\p{L}\p{M}]+(?:['’\-][\p{L}\p{M}]+)*$/u.test(word)) {
-              setSelectedWord({passageId:item.id, language, word});
-            } else {
-              setSelectedWord(current => current?.passageId === item.id ? null : current);
-            }
-          }}
-          style={[styles.passage,styles.passageInput,background === 'images' && styles.imagePassage,{fontSize,lineHeight:Math.round(fontSize * 1.5),height:passageHeights[`${item.id}-${language}-${fontSize}-${width}`]}]}
-        /></ScrollView>
-        <View><View style={styles.pageBottom}><View style={styles.referenceGroup}><Text accessibilityLabel={`${activeBook.title}, chapter ${item.chapter}, ${item.label}`} style={[styles.reference,background === 'images' && styles.imageReference]}>{activeBook.shortTitle} {item.chapter}.{item.label.replace(/^TEXTS?\s+/i, '')}</Text>{selectedWord?.passageId === item.id && selectedWord.language === language && sharingId !== item.id && <Pressable accessibilityRole="button" accessibilityLabel={`Look up ${selectedWord.word}`} onPress={() => void showWord(selectedWord.word, selectedWord.language)} style={styles.lookupButton}><Text numberOfLines={1} style={styles.lookupText}>Look up “{selectedWord.word}”</Text></Pressable>}</View><View style={[styles.actions,sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={narrating ? 'Stop reading aloud' : 'Read passage aloud'} onPress={() => {if (readAloud || readAloudRef.current) stopReadAloud(); else if (narrating) stopNarration(); else void startNarration(item);}} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{narrating ? <Path d="M7 7h10v10H7z"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved, item.id) ? 'Remove saved passage' : 'Save passage'} onPress={() => void toggle(item)} style={styles.action}><Text style={styles.heart}>{Object.hasOwn(saved, item.id) ? '♥' : '♡'}</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="Share passage image" accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null} onPress={() => void sharePassage(item)} style={styles.action}><Svg accessible={false} width={22} height={22} viewBox="0 0 24 24" fill="none"><Path d="M22 2 9.5 14.5M22 2l-7.5 20-5-7.5L2 9.5 22 2Z" stroke={colors.accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg></Pressable>{Object.hasOwn(saved, item.id) && <Pressable accessibilityRole="button" accessibilityLabel="Edit note" onPress={() => {setEditing(item.id); setNote(saved[item.id]);}} style={styles.action}><Text style={styles.noteIcon}>✎</Text></Pressable>}</View></View></View>
-      </View>}/> : screen === 'books' ? <View style={styles.section}>
+        <PassageBody key={`${item.id}-${language}-${fontSize}-${width}-${fontScale}-${loading}`} active={rowIndex===index} registerNavigation={registerContinuation} onPartChange={onContinuationChange} text={item[language]} fontSize={fontSize} textStyle={[styles.passage, useBookImages && styles.imagePassage]} continuationColor={useBookImages ? '#ffffff' : colors.muted}
+          renderText={(chunk, offset, size) => <Text accessibilityLabel={chunk} accessibilityHint={t("Use the copy passage action to copy all text.")} accessibilityActions={[{name:'copyPassage', label:t("Copy passage")},{name:'toggleImmersive',label:immersive ? (appLanguage==='hi'?'रीडिंग नियंत्रण दिखाएँ':'Show reading controls') : (appLanguage==='hi'?'पूर्ण स्क्रीन में पढ़ें':'Read full screen')}]} onAccessibilityAction={event => {if (event.nativeEvent.actionName === 'toggleImmersive') changeImmersive(!immersive); if (event.nativeEvent.actionName === 'copyPassage') void Clipboard.setStringAsync(item[language]).catch(() => Alert.alert(t("Could not copy text"), t("Please try again.")));}} selectable={false} style={[styles.passage, useBookImages && styles.imagePassage, {fontSize:size,lineHeight:Math.round(size*1.5)}]}>
+            {segmentPassage(chunk).map(local => {
+              const segment = {...local,start:local.start+offset,end:local.end+offset};
+              const selected = selectedWord?.passageId === item.id && selectedWord.language === language && segment.start >= selectedWord.start && segment.end <= selectedWord.end;
+              return segment.word ? <Text key={segment.start} onPress={event => selectPassageWord(item, segment, event.nativeEvent.pageX, event.nativeEvent.pageY, Date.now())} style={selected ? {backgroundColor:colors.accent,color:colors.onAccent} : undefined}>{segment.text}</Text> : <Text key={segment.start} style={selected ? {backgroundColor:colors.accent,color:colors.onAccent} : undefined}>{segment.text}</Text>;
+            })}
+          </Text>}
+          renderTools={() => selectedWord?.passageId === item.id && selectedWord.language === language && sharingId !== item.id && <View style={styles.selectionTools}>
+            <Pressable accessibilityRole="button" accessibilityLabel={t("Copy selected text")} onPress={() => void copySelection(item, Date.now())} style={styles.selectionButton}><Text style={styles.selectionButtonText}>{t("Copy")}</Text></Pressable>
+            {selectedLookupWord(item[language], selectedWord.start, selectedWord.end) && <Pressable accessibilityRole="button" onPress={() => {protectSelectionUntil.current = Date.now() + 500; const word = selectedLookupWord(item[language], selectedWord.start, selectedWord.end); if (word) void showWord(word, language);}} style={styles.selectionButton}><Text style={styles.selectionButtonText}>{t("Look up")}</Text></Pressable>}
+            <Pressable accessibilityRole="button" accessibilityLabel={t("Clear selection")} onPress={() => {activeSelection.current = null; setSelectedWord(null);}} style={styles.selectionButton}><Text style={styles.selectionButtonText}>{t("Done")}</Text></Pressable>
+            <Text style={styles.selectionHint}>{t("Tap another word to extend")}</Text>
+          </View>} />
+        {!immersive && <View><View style={styles.pageBottom}><View style={styles.referenceGroup}><Text accessibilityLabel={activeBook.id === GITA_BOOK_ID ? `${activeBook.title}, chapter ${item.chapter}, ${item.label}` : `${activeBook.title}, ${item.chapterTitle}, ${item.label}`} style={[styles.reference,useBookImages && styles.imageReference]}>{activeBook.id === GITA_BOOK_ID ? `${appLanguage === 'hi' ? 'गीता' : activeBook.shortTitle} ${item.chapter}.${item.label.replace(/^TEXTS?\s+/i, '')}` : `${localChapter(item.chapterTitle)} · ${appLanguage === 'hi' ? item.label.replace('PASSAGE','अंश') : item.label.toLowerCase()}`}</Text></View><View style={[styles.actions,sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={narrating ? t("Stop reading aloud") : t("Read passage aloud")} onPress={() => {if (readAloud || readAloudRef.current) stopReadAloud(); else if (narrating) stopNarration(); else if (!loading) void startNarration(item);}} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{narrating ? <Path d="M7 7h10v10H7z"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved, item.id) ? t("Remove saved passage") : t("Save passage")} onPress={() => void toggle(item)} style={styles.action}><Text style={styles.heart}>{Object.hasOwn(saved, item.id) ? '♥' : '♡'}</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel={t("Share passage image")} accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null || loading} onPress={() => void sharePassage(item)} style={styles.action}><Svg accessible={false} width={22} height={22} viewBox="0 0 24 24" fill="none"><Path d="M22 2 9.5 14.5M22 2l-7.5 20-5-7.5L2 9.5 22 2Z" stroke={colors.accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg></Pressable>{Object.hasOwn(saved, item.id) && <Pressable accessibilityRole="button" accessibilityLabel={t("Edit note")} onPress={() => {setEditing(item.id); setNote(saved[item.id]);}} style={styles.action}><Text style={styles.noteIcon}>✎</Text></Pressable>}</View></View></View>}
+      </View>; }}/> : screen === 'books' ? <View style={styles.section}>
         <FlatList data={books} keyExtractor={book => book.id} renderItem={({item}) => {
-          const last = item.passages.find(p => p.id === lastByBook[item.id]);
-          return <Pressable accessibilityRole="button" accessibilityLabel={`Open ${item.title}`} onPress={() => openBook(item)} style={styles.row}>
-            <View style={{flex:1}}><Text style={styles.rowTitle}>{item.title}</Text><Text style={styles.bookDetail}>{last ? `Continue · Chapter ${last.chapter}` : `${item.chapters.length} chapters`}</Text></View><Text style={styles.arrow}>›</Text>
-          </Pressable>;
+          const last = lastByBook[item.id] ? item.passages.find(p => p.id === lastByBook[item.id]) : undefined;
+          const installed = !!installedBooks[item.id];
+          const downloading = bookDownload?.id === item.id;
+          const progress = downloading ? Math.round(bookDownload.progress*100) : 0;
+          return <View style={styles.bookRow}>
+            <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${installed ? (appLanguage==='hi' ? 'खोलें' : 'open') : (appLanguage==='hi' ? 'डाउनलोड करें' : 'download')}`} onPress={() => openBook(item)} onLongPress={() => setBookInfo(item)} style={{flexDirection:'row',alignItems:'center',gap:18,flex:1}}>
+              <View style={{width:76,height:114,borderRadius:5,overflow:'hidden'}}>
+                <Image source={item.cover} style={styles.bookCover} resizeMode="cover" blurRadius={installed ? 0 : 3} accessibilityIgnoresInvertColors accessible={false}/>
+                {downloading && <View accessibilityRole="progressbar" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'डाउनलोड हो रही है':'downloading'}`} accessibilityValue={{min:0,max:100,now:progress}} style={{position:'absolute',top:0,bottom:0,left:0,right:0,backgroundColor:'rgba(0,0,0,0.48)',alignItems:'center',justifyContent:'center'}}><Text style={{color:'#fff',fontSize:17,fontWeight:'700'}}>{progress}%</Text><View style={{width:48,height:3,backgroundColor:'rgba(255,255,255,0.4)',marginTop:8,borderRadius:2}}><View style={{width:`${progress}%`,height:3,backgroundColor:'#fff',borderRadius:2}}/></View></View>}
+              </View>
+              <View style={{flex:1}}><Text style={styles.bookTitle}>{t(item.title)}</Text><Text style={styles.bookDetail}>{!installed ? `${(bookDownloads[item.id].bytes/1000000).toFixed(1)} MB · ${item.languages.includes('hi') ? t("Hindi, English & Sanskrit") : t("English & Sanskrit")}` : last ? `${appLanguage==='hi'?'जारी रखें':'Continue'} · ${localChapter(last.chapterTitle)}` : `${item.chapters.length} ${appLanguage==='hi'?'अध्याय':'chapters'}`}</Text></View>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'की जानकारी':'information'}`} onPress={() => setBookInfo(item)} style={{width:44,height:48,alignItems:'center',justifyContent:'center'}}><Svg width={24} height={24} viewBox="0 0 24 24" fill={colors.muted}><Circle cx={5} cy={12} r={1.8}/><Circle cx={12} cy={12} r={1.8}/><Circle cx={19} cy={12} r={1.8}/></Svg></Pressable>
+            {!installed ? <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'डाउनलोड करें':'download'}`} accessibilityState={{busy:downloading}} onPress={() => {if (!downloading) void installBook(item);}} style={{width:48,height:48,alignItems:'center',justifyContent:'center'}}><Svg width={32} height={32} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><Path d="M12 3v12m-5-5 5 5 5-5M5 19h14"/></Svg></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'खोलें':'open'}`} onPress={() => openBook(item)} style={{width:48,height:48,alignItems:'center',justifyContent:'center'}}><Text accessible={false} style={styles.arrow}>›</Text></Pressable>}
+          </View>;
         }}/>
-      </View> : <View style={styles.section}><FlatList<NavigationItem> data={screen === 'chapters' ? chapters.map(c => {
-        const resumeIndex = chapterResumeIndex(passages, c.number, chapterPositions[c.number]);
-        return {key: String(c.number), title: c.title,
-          detail: `CHAPTER ${String(c.number).padStart(2, '0')}`,
-          progress: chapterReadingProgress(passages, c.number, chapterPositions[c.number]),
-          idx: resumeIndex};
-      }) : passages.filter(p => Object.hasOwn(saved, p.id)).map(p => ({key: p.id, title: p[language], detail: saved[p.id] || p.label, progress: undefined, idx: passages.indexOf(p)}))} keyExtractor={item => item.key} ListEmptyComponent={<Text style={styles.empty}>Nothing saved yet. Tap the heart while reading to save a passage.</Text>} renderItem={({item}) => <Pressable accessibilityRole="button" onPress={() => jump(item.idx)} style={styles.row}><View style={{flex: 1}}><Text style={styles.rowLabel}>{item.detail}</Text><Text style={styles.rowTitle} numberOfLines={2}>{item.title}</Text>{item.progress && <View style={styles.chapterProgress}>
+      </View> : <View style={styles.section}><FlatList<NavigationItem> data={screen === 'chapters' ? chapterItems : passages.filter(p => Object.hasOwn(saved, p.id)).map(p => ({key: p.id, title: (savedText[p.id]?.[language] ?? p[language]) || p.label, detail: saved[p.id] || p.label, progress: undefined, idx: passages.indexOf(p)}))} keyExtractor={item => item.key} ListEmptyComponent={<Text style={styles.empty}>{t("Nothing saved yet. Tap the heart while reading to save a passage.")}</Text>} renderItem={({item}) => <Pressable accessibilityRole="button" onPress={() => jump(item.idx)} style={styles.row}><View style={{flex: 1}}><Text style={styles.rowLabel}>{item.detail}</Text><Text style={styles.rowTitle} numberOfLines={2}>{item.title}</Text>{item.progress && <View style={styles.chapterProgress}>
           <View style={styles.progressLabels}><Text style={styles.progressText}>{item.progress.label}</Text><Text style={styles.progressText}>{item.progress.percent}%</Text></View>
-          <View accessibilityRole="progressbar" accessibilityLabel={`Reading position: ${item.progress.label}`} accessibilityValue={{min:0,max:100,now:item.progress.percent}} style={styles.progressTrack}><View style={[styles.progressFill,{width:`${item.progress.percent}%`}]}/></View>
+          <View accessibilityRole="progressbar" accessibilityLabel={`${appLanguage==='hi'?'पढ़ने की स्थिति':'Reading position'}: ${item.progress.label}`} accessibilityValue={{min:0,max:100,now:item.progress.percent}} style={styles.progressTrack}><View style={[styles.progressFill,{width:`${item.progress.percent}%`}]}/></View>
         </View>}</View><Text style={styles.arrow}>↗</Text></Pressable>}/></View>}
     </View>
+    <Modal visible={sectionMenuOpen} transparent animationType="none" onRequestClose={() => setSectionMenuOpen(false)}>
+      <View style={{flex:1}}><Pressable accessibilityRole="button" accessibilityLabel={t("Close section menu")} onPress={() => setSectionMenuOpen(false)} style={{position:'absolute',top:0,bottom:0,left:0,right:0}}/>
+        <SafeAreaView pointerEvents="box-none" style={{flex:1}}><View style={{position:'absolute',top:insets.top+58,left:16,width:220,backgroundColor:colors.white,borderColor:colors.line,borderWidth:1,borderRadius:14,overflow:'hidden',shadowColor:'#000',shadowOpacity:0.14,shadowRadius:12,shadowOffset:{width:0,height:5},elevation:8}}>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Books, current section")} onPress={() => setSectionMenuOpen(false)} style={{minHeight:52,paddingHorizontal:16,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}}><Text style={{fontSize:16,fontWeight:'600',color:colors.ink}}>{t("Books")}</Text><Text style={{fontSize:18,color:colors.accent}}>✓</Text></Pressable>
+          <View style={{height:StyleSheet.hairlineWidth,backgroundColor:colors.line,marginHorizontal:16}}/>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Open Prashnavali")} onPress={() => {setSectionMenuOpen(false); setTimeout(() => router.push({pathname:'/prashnavali',params:{theme:colorTheme}}),150);}} style={{minHeight:52,paddingHorizontal:16,justifyContent:'center'}}><Text style={{fontSize:16,color:colors.ink}}>{t("Prashnavali")}</Text></Pressable>
+        </View></SafeAreaView>
+      </View>
+    </Modal>
+    <Modal visible={bookInfo !== null} transparent animationType="slide" onRequestClose={() => setBookInfo(null)}>
+      <View style={styles.overlay}><Pressable accessibilityRole="button" accessibilityLabel={t("Close book information")} onPress={() => setBookInfo(null)} style={{position:'absolute',top:0,bottom:0,left:0,right:0}}/><View style={[styles.sheet,{padding:24,gap:16}]}>
+        {bookInfo && <><Text accessibilityRole="header" style={styles.bookTitle}>{appLanguage === 'hi' ? `${t(bookInfo.title)} के बारे में` : `About ${bookInfo.title}`}</Text>
+          <Text style={styles.bookDetail}>{bookInfo.id === GITA_BOOK_ID ? t("Sanskrit with Hindi and English translations by Hansi Gita Bhawan Trust.") : t("Sanskrit and English from the Itihasa corpus. This historic edition was digitised using OCR and may contain errors; some source passages contain multiple verses.")}</Text>
+          <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(bookInfo.id === GITA_BOOK_ID ? 'https://gitabhawan.org.in/gita/research' : 'https://aclanthology.org/2021.wat-1.22/')} style={styles.button}><Text style={{color:colors.accent}}>{t("View source and credits ↗")}</Text></Pressable>
+          {installedBooks[bookInfo.id] && <Pressable accessibilityRole="button" onPress={() => {const book=bookInfo; setBookInfo(null); setTimeout(() => confirmRemoveBook(book), 400);}} style={[styles.button,{borderWidth:1,borderColor:colors.line,alignItems:'center'}]}><Text style={{color:colors.accent,fontWeight:'600'}}>{t("Remove download")}</Text></Pressable>}
+        </>}
+      </View></View>
+    </Modal>
     {readerMenuOpen && <View style={styles.readerMenuOverlay}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Close book menu" onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
+      <Pressable accessibilityRole="button" accessibilityLabel={t("Close book menu")} onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
       <View style={styles.sheet}>
-        <Text accessibilityRole="header" style={styles.readerMenuTitle}>{activeBook.title}</Text>
-        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>Saved verses and notes</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
-        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSettingsPage('menu');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>Settings</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Text accessibilityRole="header" style={styles.readerMenuTitle}>{t(activeBook.title)}</Text>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Saved verses and notes")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSettingsPage('menu');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Settings")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
       </View>
     </View>}
     <Modal visible={settingsPage !== null} animationType="slide" onRequestClose={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')}>
       <SafeAreaProvider><SafeAreaView style={styles.settingsScreen}>
         <View style={styles.settingsNavigationHeader}>
-          <Pressable accessibilityRole="button" accessibilityLabel={settingsPage === 'menu' ? 'Back to reader' : 'Back to settings'} onPress={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>
-          <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'reading' ? 'Reading customisation' : settingsPage === 'appearance' ? 'App appearance' : settingsPage === 'playback' ? 'Reading playback' : settingsPage === 'music' ? 'Music' : 'Settings'}</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={settingsPage === 'menu' ? t("Back to reader") : t("Back to settings")} onPress={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>
+          <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'language' ? t("App language") : settingsPage === 'credits' ? t("Credits") : settingsPage === 'privacy' ? (appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy') : settingsPage === 'reading' ? t("Reading customisation") : settingsPage === 'appearance' ? t("App appearance") : settingsPage === 'playback' ? t("Reading playback") : settingsPage === 'music' ? t("Music") : settingsPage === 'downloads' ? t("Downloaded resources") : settingsPage === 'dictionary' ? t("Dictionary") : t("Settings")}</Text>
         </View>
         {settingsPage === 'menu' ? <ScrollView contentContainerStyle={styles.settingsList}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Reading customisation" onPress={() => setSettingsPage('reading')} style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading customisation</Text><Text style={styles.settingsMenuDescription}>Adjust text size and reading background.</Text></View><Text style={styles.settingsChevron}>›</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("App language")} onPress={() => setSettingsPage('language')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("App language")}</Text><Text style={styles.settingsMenuDescription}>{t("Choose the language used in menus and settings.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="App appearance" onPress={() => setSettingsPage('appearance')} style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>App appearance</Text><Text style={styles.settingsMenuDescription}>Choose the colors used throughout the app.</Text></View><Text style={styles.settingsChevron}>›</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Reading customisation")} onPress={() => setSettingsPage('reading')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading customisation")}</Text><Text style={styles.settingsMenuDescription}>{t("Adjust text size and reading background.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Reading playback" onPress={() => setSettingsPage('playback')} style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading playback</Text><Text style={styles.settingsMenuDescription}>Manage read aloud and auto-scroll.</Text></View><Text style={styles.settingsChevron}>›</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("App appearance")} onPress={() => setSettingsPage('appearance')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("App appearance")}</Text><Text style={styles.settingsMenuDescription}>{t("Choose the colors used throughout the app.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel="Music" onPress={() => setSettingsPage('music')} style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Music</Text><Text style={styles.settingsMenuDescription}>Control background music and volume.</Text></View><Text style={styles.settingsChevron}>›</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Reading playback")} onPress={() => setSettingsPage('playback')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading playback")}</Text><Text style={styles.settingsMenuDescription}>{t("Manage read aloud and auto-scroll.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Music")} onPress={() => setSettingsPage('music')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Music")}</Text><Text style={styles.settingsMenuDescription}>{t("Control background music and volume.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Dictionary")} onPress={() => setSettingsPage('dictionary')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Dictionary")}</Text><Text style={styles.settingsMenuDescription}>{t("Manage offline definitions and source information.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Downloaded resources")} onPress={() => setSettingsPage('downloads')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Downloaded resources")}</Text><Text style={styles.settingsMenuDescription}>{t("Manage the offline voice and dictionary.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy'} onPress={() => setSettingsPage('privacy')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage === 'hi' ? 'आपका डेटा, डाउनलोड और संपर्क जानकारी।' : 'Your data, downloads and contact information.'}</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={t("Credits")} onPress={() => setSettingsPage('credits')} style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Credits")}</Text><Text style={styles.settingsMenuDescription}>{t("Books, music, voice and other sources.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
+          </Pressable>
+        </ScrollView> : settingsPage === 'language' ? <ScrollView contentContainerStyle={styles.settingsList}>
+          <Text style={styles.imageHelp}>{t("Choose the language used in menus and settings.")} {appLanguage === 'hi' ? 'पुस्तक के पाठ की भाषा अलग से चुनी जाती है।' : t("The reading language is chosen separately.")}</Text>
+          {([['en',t("English")],['hi','हिंदी']] as const).map(([value,label]) => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{checked:appLanguage===value}} onPress={() => void setAppLanguage(value)} style={styles.choiceRow}><Text style={styles.settingsMenuTitle}>{label}</Text>{appLanguage===value && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>)}
+        </ScrollView> : settingsPage === 'privacy' ? <ScrollView contentContainerStyle={styles.settingsList}>
+          <Text style={styles.imageHelp}>{appLanguage === 'hi' ? 'गोपनीयता नीति का प्रारूप · 18 नवंबर 2026' : 'Privacy policy draft · 18 November 2026'}</Text>
+          {[
+            ["Your device", "आपका डिवाइस", "Reading progress, saved passages, notes, preferences and downloaded content are stored on your device. Photos you select for backgrounds are copied into the app. Your device or backup provider may include app data in backups according to your settings.", "पढ़ने की स्थिति, सहेजे गए अंश, नोट्स, प्राथमिकताएँ और डाउनलोड की गई सामग्री आपके डिवाइस पर रहती है। पृष्ठभूमि के लिए चुने गए चित्रों की प्रतियाँ ऐप में रखी जाती हैं। आपकी सेटिंग के अनुसार डिवाइस या बैकअप सेवा ऐप डेटा का बैकअप ले सकती है।"],
+            ["Downloads", "डाउनलोड", "Book files come from GitHub, the optional dictionary from en-word.net, and optional voice files from Hugging Face and GitHub. These services may receive your IP address, requested file, request time and other technical details and retain logs under their own policies. Downloads may use mobile data.", "पुस्तकें GitHub से, वैकल्पिक शब्दकोश en-word.net से और वैकल्पिक वॉइस फ़ाइलें Hugging Face और GitHub से डाउनलोड होती हैं। इन सेवाओं को आपका IP पता, फ़ाइल का नाम, अनुरोध का समय और तकनीकी जानकारी मिल सकती है; वे अपनी नीतियों के अनुसार लॉग रख सकती हैं। डाउनलोड में मोबाइल डेटा लग सकता है।"],
+            ["On-device features", "डिवाइस पर चलने वाली सुविधाएँ", "The voice model reads text and the dictionary looks up words on your device. These features do not send the passage or lookup word to a remote service. An internet connection is needed to download their files first.", "वॉइस मॉडल पाठ पढ़ता है और शब्दकोश शब्दों का अर्थ आपके डिवाइस पर खोजता है। ये सुविधाएँ अंश या खोजा गया शब्द किसी दूरस्थ सेवा को नहीं भेजतीं। पहली बार फ़ाइलें डाउनलोड करने के लिए इंटरनेट चाहिए।"],
+            ["Photos, copy and sharing", "चित्र, कॉपी और शेयर", "Choosing photos is optional. Copy puts the selected text on your device clipboard. Sharing opens the system share sheet; the app you choose receives what you share and applies its own privacy policy. External links open other services and their policies apply.", "चित्र चुनना वैकल्पिक है। कॉपी करने पर चुना हुआ पाठ डिवाइस के क्लिपबोर्ड पर जाता है। शेयर करने पर सिस्टम की शेयर सूची खुलती है; चुने गए ऐप को साझा की गई सामग्री मिलती है और उसकी अपनी गोपनीयता नीति लागू होती है। बाहरी लिंक पर संबंधित सेवा की नीति लागू होती है।"],
+            ["Accounts and analytics", "खाते और विश्लेषण", "This version does not require a DivineCanvas account and has no advertising or analytics feature. We do not sell your personal information. Other services you choose to use have their own privacy policies.", "इस संस्करण में DivineCanvas खाता आवश्यक नहीं है और विज्ञापन या विश्लेषण की सुविधा नहीं है। हम आपकी व्यक्तिगत जानकारी नहीं बेचते। आपके द्वारा उपयोग की जाने वाली अन्य सेवाओं की अपनी गोपनीयता नीतियाँ हैं।"],
+            ["Deleting data", "डेटा हटाना", "You can remove downloaded books, the dictionary and the voice model in the app. Removing a book keeps its notes and progress. Uninstalling normally removes local app data; device or cloud backups may remain and can be managed with your backup provider. Third-party services control their own logs.", "आप ऐप में डाउनलोड की गई पुस्तकें, शब्दकोश और वॉइस मॉडल हटा सकते हैं। पुस्तक हटाने पर उसके नोट्स और पढ़ने की स्थिति बनी रहती है। ऐप हटाने पर आम तौर पर स्थानीय डेटा हट जाता है; डिवाइस या क्लाउड बैकअप रह सकते हैं, जिन्हें आप अपनी बैकअप सेवा में प्रबंधित कर सकते हैं। अन्य सेवाएँ अपने लॉग स्वयं नियंत्रित करती हैं।"],
+            ["Questions", "सवाल", "For privacy questions or requests, contact tanyamaurya2001@gmail.com. We will update this policy if our practices change.", "गोपनीयता से संबंधित सवालों या अनुरोधों के लिए tanyamaurya2001@gmail.com पर संपर्क करें। हमारी प्रक्रिया बदलने पर हम यह नीति अपडेट करेंगे।"],
+          ].map(([enTitle, hiTitle, enText, hiText]) => <View key={enTitle} style={styles.settingsCredits}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage === 'hi' ? hiTitle : enTitle}</Text><Text style={styles.settingsCreditText}>{appLanguage === 'hi' ? hiText : enText}</Text></View>)}
+        </ScrollView> : settingsPage === 'credits' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsCredits}>
-            <Text style={styles.settingsCreditText}>Bhagavad Gita Hindi and English translations by Hansi Gita Bhawan Trust.</Text>
-            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://gitabhawan.org.in/gita/research')} style={styles.settingsCreditLink}>View source and terms ↗</Text>
+            <Text style={styles.settingsMenuTitle}>{t("Books")}</Text>
+            <Text style={styles.settingsCreditText}>{t("Bhagavad Gita Hindi and English translations by Hansi Gita Bhawan Trust.")}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://gitabhawan.org.in/gita/research')} style={styles.settingsCreditLink}>{t("View source and terms ↗")}</Text>
+            <Text style={styles.settingsCreditText}>{t("Ramayana and Mahabharata: Itihasa corpus by Rahul Aralikatte and colleagues, based on Manmatha Nath Dutt’s English translations. OCR text may contain errors.")}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://aclanthology.org/2021.wat-1.22/')} style={styles.settingsCreditLink}>{t("Itihasa source ↗")}</Text>
+            <Text style={styles.settingsCreditText}>{t("Ramcharitmanas passages: WirelessAlien/Ramcharitmanas, sourced from the IIT Kanpur Ramcharitmanas project. Board reference: Chalisa Sangrah. Meanings are original summaries.")}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/WirelessAlien/Ramcharitmanas')} style={styles.settingsCreditLink}>{appLanguage==='hi' ? 'प्रश्नावली पाठ का स्रोत ↗' : 'Prashnavali passage source ↗'}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://chalisasangrah.in/Prashnavali')} style={styles.settingsCreditLink}>{appLanguage==='hi' ? 'प्रश्नावली का संदर्भ ↗' : 'Prashnavali board reference ↗'}</Text>
           </View>
+          <View style={styles.settingsCredits}>
+            <Text style={styles.settingsMenuTitle}>{t("Reading voice")} · {t("Music")}</Text>
+            <Text style={styles.settingsCreditText}>{t("Reading voice: Paradee by Sahil Mahendrakar.")}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/sahilmahendrakar/paradee')} style={styles.settingsCreditLink}>{t("Voice source ↗")}</Text>
+            <Text style={styles.settingsCreditText}>{t("“Krishna Flute Music” by Alex Morgan, licensed under Creative Commons Attribution 4.0.")}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://freemusicarchive.org/music/alex-morgan/world-devotional-music/krishna-flute-music/')} style={styles.settingsCreditLink}>{t("Music source ↗")}</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')} style={styles.settingsCreditLink}>{t("License ↗")}</Text>
+          </View>
+          <View style={styles.settingsCredits}>
+            <Text style={styles.settingsMenuTitle}>{t("Dictionary")}</Text>
+            <Text style={styles.settingsCreditText}>{t("Open English WordNet 2025, based on Princeton WordNet. Licensed under CC BY 4.0 and the Princeton WordNet license.")}</Text>
+            <Text accessibilityRole="button" accessibilityState={{expanded:showDictionaryLicense}} onPress={() => setShowDictionaryLicense(value => !value)} style={styles.settingsCreditLink}>{showDictionaryLicense ? t("Hide full notice") : t("View full notice")}</Text>
+            {showDictionaryLicense && <Text style={styles.settingsCreditText}>{wordnetNotice}</Text>}
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/globalwordnet/english-wordnet/blob/2025-edition/LICENSE.md')} style={styles.settingsCreditLink}>{t("Dictionary source and license ↗")}</Text>
+          </View>
+          <View style={styles.settingsCredits}>
+            <Text style={styles.settingsCreditText}>{appLanguage === 'hi' ? 'पठन के चित्र परियोजना स्वामी द्वारा उपलब्ध कराए गए हैं।' : 'Reading images were supplied by the project owner.'}</Text>
+            <Text style={styles.settingsCreditText}>{t("Settings icon by Lucide Icons and Contributors.")}</Text>
+            <Text accessibilityRole="button" accessibilityState={{expanded:showIconLicense}} onPress={() => setShowIconLicense(value => !value)} style={styles.settingsCreditLink}>{showIconLicense ? t("Hide icon license") : t("View icon license")}</Text>
+            {showIconLicense && <Text style={styles.settingsCreditText}>{lucideNotice}</Text>}
+          </View>
+        </ScrollView> : settingsPage === 'dictionary' ? <ScrollView contentContainerStyle={styles.settingsList}>
+          <View style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
+            {dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={dictionaryInstalled ? t("Remove English dictionary") : t("Download English dictionary")} onPress={() => {if (dictionaryInstalled) deleteDictionary(); else void installDictionaryFromSettings();}}><Text style={styles.downloadCancel}>{dictionaryInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
+          </View>
+          <Text style={styles.imageHelp}>{t("Double-tap an English word while reading to look it up. Hindi and Sanskrit dictionaries are not available yet.")}</Text>
+        </ScrollView> : settingsPage === 'downloads'  ? <ScrollView contentContainerStyle={styles.settingsList}>
+          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Downloaded · about 11 MB") : t("Not downloaded · about 11 MB")}</Text></View>
+            {voiceDownload !== null ? <Pressable accessibilityRole="button" onPress={cancelVoiceDownload}><Text style={styles.downloadCancel}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={styles.downloadCancel}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
+          </View>
+          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
+            {dictionaryInstalled && dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Remove English dictionary")} onPress={deleteDictionary}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>}
+          </View>
+          <Text style={styles.imageHelp}>{t("The dictionary can be downloaded when you double-tap an English word. Removing a resource does not remove your saved verses or notes.")}</Text>
         </ScrollView> : settingsPage === 'playback' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Read aloud</Text><Text style={styles.settingsMenuDescription}>Read each passage and move to the next when finished. Tap the reader to stop.</Text></View>
-            <Switch accessibilityLabel="Read aloud" value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Tap the reader to stop.")}</Text></View>
+            <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading voice</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `Downloading ${Math.round(voiceDownload*100)}%` : voiceInstalled ? 'Paradee voice is available offline.' : 'Download an offline voice (about 11 MB).'}</Text></View>
-            {voiceDownload !== null ? <Pressable accessibilityRole="button" accessibilityLabel="Cancel voice download" onPress={() => speechDownloadAbort.current?.abort()}><Text style={{color:colors.accent}}>Cancel</Text></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={voiceInstalled ? 'Remove reading voice' : 'Download reading voice'} onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={{color:colors.accent,fontWeight:'600'}}>{voiceInstalled ? 'Remove' : 'Download'}</Text></Pressable>}
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Paradee voice is available offline.") : t("Download an offline voice (about 11 MB).")}</Text></View>
+            {voiceDownload !== null ? <Pressable accessibilityRole="button" accessibilityLabel={t("Cancel voice download")} onPress={cancelVoiceDownload}><Text style={{color:colors.accent}}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={voiceInstalled ? t("Remove reading voice") : t("Download reading voice")} onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={{color:colors.accent,fontWeight:'600'}}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
           </View>
-          {!runtimeAvailable && <Text style={styles.imageHelp}>Reading aloud requires a development build.</Text>}
+          {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Auto-scroll</Text><Text style={styles.settingsMenuDescription}>Move to the next passage after a chosen time.</Text></View>
-            <Switch accessibilityLabel="Auto-scroll" value={autoScrollEnabled} onValueChange={value => {if (value) stopReadAloud(); setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{t("Move to the next passage after a chosen time.")}</Text></View>
+            <Switch accessibilityLabel={t("Auto-scroll")} value={autoScrollEnabled} onValueChange={value => {if (value) stopReadAloud(); setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />
           </View>
           <View style={{paddingVertical:18}}>
-            <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>Time per passage</Text><Text style={styles.settingsMenuDescription}>{autoScrollSeconds} seconds</Text></View>
-            <Slider accessibilityLabel="Time per passage" accessibilityValue={{min:5,max:60,now:autoScrollSeconds,text:`${autoScrollSeconds} seconds`}} minimumValue={5} maximumValue={60} step={1} value={autoScrollSeconds} onValueChange={setAutoScrollSeconds} onSlidingComplete={value => {setAutoScrollSeconds(value); savePreference('auto-scroll-seconds', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
-            <Text style={styles.settingsMenuDescription}>Timed scrolling pauses while you interact. Read aloud advances after the voice finishes instead.</Text>
-          </View>
-          <View style={styles.settingsCredits}>
-            <Text style={styles.settingsCreditText}>Reading voice: Paradee by Sahil Mahendrakar.</Text>
-            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/sahilmahendrakar/paradee')} style={styles.settingsCreditLink}>Voice source ↗</Text>
+            <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>{t("Time per passage")}</Text><Text style={styles.settingsMenuDescription}>{autoScrollSeconds} {t("seconds")}</Text></View>
+            <Slider accessibilityLabel={t("Time per passage")} accessibilityValue={{min:5,max:60,now:autoScrollSeconds,text:`${autoScrollSeconds} ${t("seconds")}`}} minimumValue={5} maximumValue={60} step={1} value={autoScrollSeconds} onValueChange={setAutoScrollSeconds} onSlidingComplete={value => {setAutoScrollSeconds(value); savePreference('auto-scroll-seconds', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
+            <Text style={styles.settingsMenuDescription}>{t("Timed scrolling pauses while you interact. Read aloud advances after the voice finishes instead.")}</Text>
           </View>
         </ScrollView> : settingsPage === 'music' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>Reading music</Text><Text style={styles.settingsMenuDescription}>Play instrumental music while reading.</Text></View>
-            <Switch accessibilityLabel="Reading music" value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
+            <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
           </View>
           <View style={{paddingVertical: 18}}>
-            <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>Music volume</Text><Text style={styles.settingsMenuDescription}>{Math.round(musicVolume * 100)}%</Text></View>
-            <Slider accessibilityLabel="Music volume" accessibilityValue={{min:0,max:100,now:Math.round(musicVolume*100)}} minimumValue={0} maximumValue={1} step={0.01} value={musicVolume} onValueChange={setMusicVolume} onSlidingComplete={value => {setMusicVolume(value); void setting('music-volume', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
-            <View style={styles.settingsCredits}>
-              <Text style={styles.settingsCreditText}>“Krishna Flute Music” by Alex Morgan, licensed under Creative Commons Attribution 4.0.</Text>
-              <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://freemusicarchive.org/music/alex-morgan/world-devotional-music/krishna-flute-music/')} style={styles.settingsCreditLink}>Music source ↗</Text>
-              <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')} style={styles.settingsCreditLink}>License ↗</Text>
-            </View>
+            <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>{t("Music volume")}</Text><Text style={styles.settingsMenuDescription}>{Math.round(musicVolume * 100)}%</Text></View>
+            <Slider accessibilityLabel={t("Music volume")} accessibilityValue={{min:0,max:100,now:Math.round(musicVolume*100)}} minimumValue={0} maximumValue={1} step={0.01} value={musicVolume} onValueChange={setMusicVolume} onSlidingComplete={value => {setMusicVolume(value); void setting('music-volume', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
+
           </View>
         </ScrollView> : settingsPage === 'reading' ? <ScrollView contentContainerStyle={styles.settingsContent}>
-          <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>Text size</Text><Text style={styles.imageHelp}>Choose a comfortable size for reading.</Text></View><View style={styles.sizeOptions}>
-            {fontSizes.map((size,i) => <Pressable key={size} accessibilityRole="button" accessibilityLabel={`${['Small','Default','Large'][i]} text`} accessibilityState={{selected:fontSize===size}} onPress={() => {setFontSize(size); savePreference('font-size',String(size));}} style={[styles.sizeOption,fontSize===size && styles.selectedOption]}><Text style={[styles.sizeSample,{fontSize:18+i*4},fontSize===size && styles.selectedText]}>Aa</Text><Text style={[styles.optionLabel,fontSize===size && styles.selectedText]}>{['Small','Default','Large'][i]}</Text></Pressable>)}
+          <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>{t("Text size")}</Text><Text style={styles.imageHelp}>{t("Choose a comfortable size for reading.")}</Text></View><View style={styles.sizeOptions}>
+            {fontSizes.map((size,i) => <Pressable key={size} accessibilityRole="button" accessibilityLabel={`${[t("Small"),t("Default"),t("Large")][i]} ${appLanguage==='hi'?'अक्षर':'text'}`} accessibilityState={{selected:fontSize===size}} onPress={() => {setFontSize(size); savePreference('font-size',String(size));}} style={[styles.sizeOption,fontSize===size && styles.selectedOption]}><Text style={[styles.sizeSample,{fontSize:18+i*4},fontSize===size && styles.selectedText]}>Aa</Text><Text style={[styles.optionLabel,fontSize===size && styles.selectedText]}>{[t("Small"),t("Default"),t("Large")][i]}</Text></Pressable>)}
           </View></View>
-          <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>Reading background</Text><Text style={styles.imageHelp}>Choose what appears behind the text.</Text></View>
+          <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>{t("Reading background")}</Text><Text style={styles.imageHelp}>{t("Choose what appears behind the text.")}</Text></View>
             <View>
-              <Pressable accessibilityRole="radio" accessibilityLabel="No image" accessibilityState={{checked:background!=='images'}} aria-checked={background!=='images'} onPress={() => {setBackground(colorTheme); savePreference('background',colorTheme);}} style={styles.choiceRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>No image</Text><Text style={styles.settingsMenuDescription}>Use your app background color.</Text></View>{background !== 'images' && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
-              <Pressable accessibilityRole="radio" accessibilityLabel="With images" accessibilityState={{checked:background==='images'}} aria-checked={background==='images'} onPress={() => {setBackground('images'); savePreference('background','images');}} style={styles.choiceRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>With images</Text><Text style={styles.settingsMenuDescription}>Show an image behind each chapter.</Text></View>{background === 'images' && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
+              <Pressable accessibilityRole="radio" accessibilityLabel={t("No image")} accessibilityState={{checked:background!=='images'}} aria-checked={background!=='images'} onPress={() => {setBackground(colorTheme); savePreference('background',colorTheme);}} style={styles.choiceRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("No image")}</Text><Text style={styles.settingsMenuDescription}>{t("Use your app background color.")}</Text></View>{background !== 'images' && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
+              <Pressable accessibilityRole="radio" accessibilityLabel={t("With images")} accessibilityState={{checked:background==='images'}} aria-checked={background==='images'} onPress={() => {setBackground('images'); savePreference('background','images');}} style={styles.choiceRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("With images")}</Text><Text style={styles.settingsMenuDescription}>{t("Show an image behind each chapter.")}</Text></View>{background === 'images' && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
             </View>
           </View>
           {background === 'images' && <View style={styles.preferenceGroup}>
-            <View><Text style={styles.preferenceLabel}>Image style</Text><Text style={styles.imageHelp}>Choose the look of your reading background.</Text></View>
-            <View style={styles.imagePreview} accessible accessibilityLabel={`Background preview, ${imageTone === 'color' ? 'color' : 'black and white'}, blur ${imageBlur} of 8`}>
+            <View><Text style={styles.preferenceLabel}>{t("Image style")}</Text><Text style={styles.imageHelp}>{t("Choose the look of your reading background.")}</Text></View>
+            <View style={styles.imagePreview} accessible accessibilityLabel={`${appLanguage==='hi'?'पृष्ठभूमि की झलक':'Background preview'}, ${imageTone === 'color' ? t("Color") : t("Black and white")}, ${t("Blur")} ${imageBlur} / 8`}>
               <View pointerEvents="none" style={styles.fixedBackground}><FilterImage source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" filters={imageFilters}/><View style={styles.backgroundScrim}/></View>
-              <Text style={styles.imagePreviewText}>A moment to read.</Text>
+              <Text style={styles.imagePreviewText}>{t("A moment to read.")}</Text>
             </View>
             <View>
-              {([['color','Color'],['monochrome','Black and white']] as const).map(([value,label]) => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{checked:imageTone===value}} aria-checked={imageTone===value} onPress={() => {setImageTone(value); savePreference('image-tone',value);}} style={styles.choiceRow}><Text style={styles.paletteName}>{label}</Text>{imageTone===value && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>)}
+              {([['color',t("Color")],['monochrome',t("Black and white")]] as const).map(([value,label]) => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{checked:imageTone===value}} aria-checked={imageTone===value} onPress={() => {setImageTone(value); savePreference('image-tone',value);}} style={styles.choiceRow}><Text style={styles.paletteName}>{label}</Text>{imageTone===value && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>)}
             </View>
-            <View><View style={styles.blurHeading}><Text style={styles.preferenceLabel}>Blur</Text><Text style={styles.imageHelp}>{imageBlur === 0 ? 'None' : `${imageBlur} / 8`}</Text></View><Text style={styles.imageHelp}>Soften the image behind the text.</Text>
-              <Slider accessibilityLabel="Background blur" accessibilityValue={{min:0,max:8,now:imageBlur,text:imageBlur === 0 ? 'No blur' : `Blur level ${imageBlur} of 8`}} minimumValue={0} maximumValue={8} step={1} value={imageBlur} onValueChange={setImageBlur} onSlidingComplete={value => {setImageBlur(value); savePreference('image-blur',String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
-              <View style={styles.blurLabels}><Text style={styles.optionLabel}>None</Text><Text style={styles.optionLabel}>More</Text></View>
+            <View><View style={styles.blurHeading}><Text style={styles.preferenceLabel}>{t("Blur")}</Text><Text style={styles.imageHelp}>{imageBlur === 0 ? t("None") : `${imageBlur} / 8`}</Text></View><Text style={styles.imageHelp}>{t("Soften the image behind the text.")}</Text>
+              <Slider accessibilityLabel={t("Background blur")} accessibilityValue={{min:0,max:8,now:imageBlur,text:imageBlur === 0 ? t("No blur") : `${appLanguage === 'hi' ? 'धुंधलापन' : 'Blur level'} ${imageBlur} / 8`}} minimumValue={0} maximumValue={8} step={1} value={imageBlur} onValueChange={setImageBlur} onSlidingComplete={value => {setImageBlur(value); savePreference('image-blur',String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
+              <View style={styles.blurLabels}><Text style={styles.optionLabel}>{t("None")}</Text><Text style={styles.optionLabel}>{t("More")}</Text></View>
             </View>
           </View>}
-          {background === 'images' && <View style={styles.preferenceGroup}>
-            <View><Text style={styles.preferenceLabel}>Chapter images</Text><Text style={styles.imageHelp}>Choose images to use throughout this book.</Text></View>
-            <View style={styles.imageGrid}>{bookImages.map((image, i) => <Pressable key={image.id} accessibilityRole="checkbox" accessibilityLabel={`Background image ${i + 1}`} accessibilityState={{checked:selectedImages.includes(image.id)}} aria-checked={selectedImages.includes(image.id)} onPress={() => toggleImage(image.id)} style={[styles.imageOption,selectedImages.includes(image.id) && styles.imageOptionSelected]}><Image source={image.thumbnail} style={styles.imageThumbnail} resizeMethod="resize"/>{selectedImages.includes(image.id) && <View style={styles.imageCheck}><Text style={styles.imageCheckText}>✓</Text></View>}</Pressable>)}</View>
-            <Pressable accessibilityRole="button" accessibilityState={{busy:addingImages}} disabled={addingImages} onPress={() => void addImages()} style={styles.addImages}><Text style={styles.addImagesText}>{addingImages ? 'Adding images…' : '+ Add your images'}</Text></Pressable>
+          {background === 'images' && activeBook.id === GITA_BOOK_ID && <View style={styles.preferenceGroup}>
+            <View><Text style={styles.preferenceLabel}>{t("Chapter images")}</Text><Text style={styles.imageHelp}>{t("Choose images to use throughout this book.")}</Text></View>
+            <View style={styles.imageGrid}>{bookImages.map((image, i) => <Pressable key={image.id} accessibilityRole="checkbox" accessibilityLabel={`${appLanguage === 'hi' ? 'पृष्ठभूमि चित्र' : 'Background image'} ${i + 1}`} accessibilityState={{checked:selectedImages.includes(image.id)}} aria-checked={selectedImages.includes(image.id)} onPress={() => toggleImage(image.id)} style={[styles.imageOption,selectedImages.includes(image.id) && styles.imageOptionSelected]}><Image source={image.thumbnail} style={styles.imageThumbnail} resizeMethod="resize"/>{selectedImages.includes(image.id) && <View style={styles.imageCheck}><Text style={styles.imageCheckText}>✓</Text></View>}</Pressable>)}</View>
+            <Pressable accessibilityRole="button" accessibilityState={{busy:addingImages}} disabled={addingImages} onPress={() => void addImages()} style={styles.addImages}><Text style={styles.addImagesText}>{addingImages ? t("Adding images…") : t("+ Add your images")}</Text></Pressable>
           </View>}
         </ScrollView> : <ScrollView contentContainerStyle={styles.settingsContent}>
           <View style={styles.preferenceGroup}>
-            <View><Text style={styles.preferenceLabel}>Color palette</Text><Text style={styles.imageHelp}>Choose a coordinated set of colors for the app.</Text></View>
-            <View>{backgrounds.map(value => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={`${backgroundLabels[value]} palette`} accessibilityState={{checked:colorTheme===value}} aria-checked={colorTheme===value} onPress={() => {setColorTheme(value); savePreference('color-theme',value); if (background !== 'images') {setBackground(value); savePreference('background',value);}}} style={styles.choiceRow}>
-              <Text style={styles.paletteName}>{backgroundLabels[value]}</Text><View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.paletteSwatches}><View style={[styles.paletteSwatch,{backgroundColor:palettes[value].accent}]}/><View style={[styles.paletteSwatch,{backgroundColor:palettes[value].paper}]}/><View style={[styles.paletteSwatch,{backgroundColor:palettes[value].white}]}/></View><Text style={styles.choiceCheck} accessible={false}>{colorTheme===value ? '✓' : ''}</Text>
+            <View><Text style={styles.preferenceLabel}>{t("Color palette")}</Text><Text style={styles.imageHelp}>{t("Choose a coordinated set of colors for the app.")}</Text></View>
+            <View>{backgrounds.map(value => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={`${t(backgroundLabels[value])} ${appLanguage === 'hi' ? 'रंग योजना' : 'palette'}`} accessibilityState={{checked:colorTheme===value}} aria-checked={colorTheme===value} onPress={() => {setColorTheme(value); savePreference('color-theme',value); if (background !== 'images') {setBackground(value); savePreference('background',value);}}} style={styles.choiceRow}>
+              <Text style={styles.paletteName}>{t(backgroundLabels[value])}</Text><View accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.paletteSwatches}><View style={[styles.paletteSwatch,{backgroundColor:palettes[value].accent}]}/><View style={[styles.paletteSwatch,{backgroundColor:palettes[value].paper}]}/><View style={[styles.paletteSwatch,{backgroundColor:palettes[value].white}]}/></View><Text style={styles.choiceCheck} accessible={false}>{colorTheme===value ? '✓' : ''}</Text>
             </Pressable>)}</View>
           </View>
-          <View style={styles.preferenceGroup}><Text style={styles.preferenceLabel}>How the colors are used</Text><View style={styles.colorHints}>
-            <Text style={styles.colorHint}><Text style={styles.colorHintStrong}>Primary</Text> · Buttons, icons and highlights.</Text>
-            <Text style={styles.colorHint}><Text style={styles.colorHintStrong}>Secondary</Text> · The main app and reading background.</Text>
-            <Text style={styles.colorHint}><Text style={styles.colorHintStrong}>Tertiary</Text> · Menus, controls and other surfaces.</Text>
+          <View style={styles.preferenceGroup}><Text style={styles.preferenceLabel}>{t("How the colors are used")}</Text><View style={styles.colorHints}>
+            <Text style={styles.colorHint}><Text style={styles.colorHintStrong}>{t("Primary")}</Text> {t("· Buttons, icons and highlights.")}</Text>
+            <Text style={styles.colorHint}><Text style={styles.colorHintStrong}>{t("Secondary")}</Text> {t("· The main app and reading background.")}</Text>
+            <Text style={styles.colorHint}><Text style={styles.colorHintStrong}>{t("Tertiary")}</Text> {t("· Menus, controls and other surfaces.")}</Text>
           </View></View>
         </ScrollView>}
       </SafeAreaView></SafeAreaProvider>
@@ -749,19 +1035,18 @@ export default function App() {
       <View style={styles.dictionaryOverlay}>
         <Animated.View pointerEvents="none" style={[styles.dictionaryBackdrop, {opacity: dictionaryAnimation}]} />
         <Animated.View style={[styles.dictionarySheet, {transform: [{translateY: dictionaryAnimation.interpolate({inputRange:[0,1],outputRange:[height,0]})}]}]}>
-        <View style={styles.settingsHeader}><Text accessibilityRole="header" style={styles.settingsTitle}>{dictionaryWord}</Text><Pressable accessibilityRole="button" accessibilityLabel="Close dictionary" onPress={closeDictionary} style={styles.profileButton}><Text style={styles.closeIcon}>×</Text></Pressable></View>
+        <View style={styles.settingsHeader}><Text accessibilityRole="header" style={styles.settingsTitle}>{dictionaryWord}</Text><Pressable accessibilityRole="button" accessibilityLabel={t("Close dictionary")} onPress={closeDictionary} style={styles.profileButton}><Text style={styles.closeIcon}>×</Text></Pressable></View>
         <ScrollView contentContainerStyle={styles.dictionaryContent}>
-          {dictionaryStatus === 'prompt' && <><Text style={styles.dictionaryBody}>Download the English dictionary once to look up words offline.</Text><Text style={styles.dictionaryMeta}>About 10 MB · Open English WordNet</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>Download dictionary</Text></Pressable></>}
-          {dictionaryStatus === 'loading' && <View style={styles.dictionaryLoading}><ActivityIndicator color={colors.accent}/><Text style={styles.dictionaryBody}>Preparing dictionary…</Text></View>}
-          {dictionaryStatus === 'unsupported' && <Text style={styles.dictionaryBody}>{Platform.OS === 'web' ? 'Dictionary lookup is available in the mobile app.' : dictionaryLanguage === 'hi' ? 'Hindi dictionary lookup is not available yet.' : 'Sanskrit dictionary lookup is not available yet.'}</Text>}
-          {dictionaryStatus === 'error' && <><Text style={styles.dictionaryBody}>{dictionaryError}</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>Try again</Text></Pressable></>}
-          {dictionaryStatus === 'results' && (meanings.length ? meanings.map(group => <View key={group.partOfSpeech} style={styles.dictionaryGroup}><Text style={styles.preferenceLabel}>{group.partOfSpeech}</Text>{group.definitions.map((definition, i) => <Text key={i} style={styles.dictionaryBody}>{i + 1}. {definition}</Text>)}</View>) : <Text style={styles.dictionaryBody}>No definition found for this word.</Text>)}
-          {dictionaryLanguage === 'en' && <><Pressable accessibilityRole="button" onPress={() => setShowDictionaryLicense(value => !value)}><Text style={styles.dictionaryLink}>Dictionary source and license {showDictionaryLicense ? '▴' : '▾'}</Text></Pressable>{showDictionaryLicense && <><Text style={styles.dictionaryMeta}>Open English WordNet 2025, based on Princeton WordNet. Licensed under CC BY 4.0 and the Princeton WordNet license.</Text><Text style={styles.dictionaryMeta}>{wordnetNotice}</Text><Pressable accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/globalwordnet/english-wordnet/blob/2025-edition/LICENSE.md')}><Text style={styles.dictionaryLink}>View full license</Text></Pressable></>}</>}
+          {dictionaryStatus === 'prompt' && <><Text style={styles.dictionaryBody}>{t("Download the English dictionary once to look up words offline.")}</Text><Text style={styles.dictionaryMeta}>{t("About 10 MB")}</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>{t("Download dictionary")}</Text></Pressable></>}
+          {dictionaryStatus === 'loading' && <View style={styles.dictionaryLoading}><ActivityIndicator color={colors.accent}/><Text style={styles.dictionaryBody}>{dictionaryDownload !== null ? `${t("Downloading dictionary ·")} ${Math.round(dictionaryDownload*100)}%` : t("Looking up word…")}</Text></View>}
+          {dictionaryStatus === 'unsupported' && <Text style={styles.dictionaryBody}>{Platform.OS === 'web' ? t("Dictionary lookup is available in the mobile app.") : dictionaryLanguage === 'hi' ? t("Hindi dictionary lookup is not available yet.") : t("Sanskrit dictionary lookup is not available yet.")}</Text>}
+          {dictionaryStatus === 'error' && <><Text style={styles.dictionaryBody}>{dictionaryError}</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>{t("Try again")}</Text></Pressable></>}
+          {dictionaryStatus === 'results' && (meanings.length ? meanings.map(group => <View key={group.partOfSpeech} style={styles.dictionaryGroup}><Text style={styles.preferenceLabel}>{group.partOfSpeech}</Text>{group.definitions.map((definition, i) => <Text key={i} style={styles.dictionaryBody}>{i + 1}. {definition}</Text>)}</View>) : <Text style={styles.dictionaryBody}>{t("No definition found for this word.")}</Text>)}
         </ScrollView>
         </Animated.View>
       </View>
     </Modal>
-    <Modal visible={editing !== null} transparent animationType="slide" onRequestClose={() => setEditing(null)}><View style={styles.overlay}><View style={styles.sheet}><Text style={styles.title}>Add a note</Text><TextInput accessibilityLabel="Your note" multiline value={note} onChangeText={setNote} placeholder="Write something…" placeholderTextColor={colors.muted} style={styles.input}/><View style={styles.sheetActions}><Pressable onPress={() => setEditing(null)} style={styles.button}><Text style={{color:colors.ink}}>Close</Text></Pressable><Pressable onPress={() => void saveNote()} style={[styles.button, styles.buttonPrimary]}><Text style={{color: colors.onAccent, fontWeight:'600'}}>Save note</Text></Pressable></View></View></View></Modal>
+    <Modal visible={editing !== null} transparent animationType="slide" onRequestClose={() => setEditing(null)}><View style={styles.overlay}><View style={styles.sheet}><Text style={styles.title}>{t("Add a note")}</Text><TextInput accessibilityLabel={t("Your note")} multiline value={note} onChangeText={setNote} placeholder={t("Write something…")} placeholderTextColor={colors.muted} style={styles.input}/><View style={styles.sheetActions}><Pressable onPress={() => setEditing(null)} style={styles.button}><Text style={{color:colors.ink}}>{t("Close")}</Text></Pressable><Pressable onPress={() => void saveNote()} style={[styles.button, styles.buttonPrimary]}><Text style={{color: colors.onAccent, fontWeight:'600'}}>{t("Save note")}</Text></Pressable></View></View></View></Modal>
   </SafeAreaView>;
 }
-const createStyles = (colors: Palette) => StyleSheet.create({root:{flex:1,backgroundColor:colors.paper},loading:{flex:1,justifyContent:'center',backgroundColor:colors.paper},header:{paddingHorizontal:16,paddingTop:8,paddingBottom:8,flexDirection:'row',justifyContent:'space-between',alignItems:'center',borderBottomWidth:1,borderColor:colors.line},language:{paddingVertical:10,paddingHorizontal:14,backgroundColor:colors.white,borderRadius:24},languageText:{fontWeight:'600',color:colors.ink},readerBack:{fontSize:34,lineHeight:40,color:colors.ink},playbackStatus:{minHeight:30,alignItems:"center",justifyContent:"center",paddingBottom:6},readerMenuOverlay:{position:"absolute",top:0,right:0,bottom:0,left:0,justifyContent:"flex-end",zIndex:10},readerMenuBackdrop:{position:"absolute",top:0,right:0,bottom:0,left:0,backgroundColor:"#0007"},readerMenuTitle:{fontFamily:"serif",fontSize:22,color:colors.ink,marginBottom:8},readerMenuItem:{flex:1,fontSize:16,fontWeight:"600",color:colors.ink},profileButton:{width:44,height:44,borderRadius:22,alignItems:'center',justifyContent:'center'},profileGlyph:{width:24,height:24,transform:[{scale:0.85}]},profileHead:{position:'absolute',top:1,left:8,width:8,height:8,borderWidth:1.5,borderColor:colors.ink,borderRadius:4},profileShoulders:{position:'absolute',bottom:2,left:3,width:18,height:10,borderWidth:1.5,borderColor:colors.ink,borderTopLeftRadius:10,borderTopRightRadius:10,borderBottomWidth:0},settingsScreen:{flex:1,backgroundColor:colors.paper},settingsNavigationHeader:{minHeight:64,flexDirection:'row',alignItems:'center',paddingHorizontal:16,borderBottomWidth:1,borderColor:colors.line},settingsBackButton:{width:44,height:48,alignItems:'center',justifyContent:'center',marginRight:8},settingsNavigationTitle:{flex:1,fontSize:20,fontWeight:'600',color:colors.ink},settingsList:{paddingHorizontal:24,paddingTop:16,paddingBottom:32},settingsCredits:{paddingTop:24,paddingBottom:16,gap:8},settingsCreditText:{fontSize:13,lineHeight:20,color:colors.muted},settingsCreditLink:{fontSize:13,lineHeight:20,color:colors.accent,textDecorationLine:"underline",alignSelf:"flex-start"},settingsListRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:18,borderBottomWidth:1,borderColor:colors.line},choiceRow:{minHeight:68,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:14,borderBottomWidth:1,borderColor:colors.line},choiceCheck:{fontSize:20,fontWeight:'600',color:colors.accent,minWidth:24,textAlign:'center'},paletteName:{flex:1,fontSize:16,color:colors.ink},paletteSwatches:{flexDirection:'row',gap:6},paletteSwatch:{width:24,height:24,borderRadius:12,borderWidth:1,borderColor:colors.line},colorHints:{gap:10},colorHint:{fontSize:14,lineHeight:21,color:colors.muted},colorHintStrong:{fontWeight:'600',color:colors.ink},settingsHeader:{flexDirection:'row',alignItems:'center',paddingHorizontal:20,paddingVertical:16,borderBottomWidth:1,borderColor:colors.line},settingsTitle:{flex:1,fontFamily:'serif',fontSize:24,color:colors.ink},backIcon:{fontSize:32,color:colors.ink,lineHeight:36},closeIcon:{fontSize:28,color:colors.muted},settingsMenu:{padding:24},settingsMenuRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,padding:20,borderRadius:16,backgroundColor:colors.white},settingsMenuText:{flex:1,gap:6},settingsMenuTitle:{fontSize:16,fontWeight:'600',color:colors.ink},settingsMenuDescription:{fontSize:14,color:colors.muted},settingsChevron:{fontSize:28,color:colors.muted},settingsContent:{gap:32,padding:24},preferenceGroup:{gap:16},preferenceLabel:{fontSize:14,fontWeight:'600',color:colors.ink},sizeOptions:{flexDirection:'row',gap:8},sizeOption:{flex:1,minHeight:88,borderRadius:12,backgroundColor:colors.paper,padding:12,alignItems:'center',justifyContent:'center',gap:8},selectedOption:{backgroundColor:colors.accent},selectedText:{color:colors.onAccent,fontWeight:'600'},sizeSample:{color:colors.ink},optionLabel:{fontSize:13,color:colors.muted},backgroundOption:{flex:1,alignItems:'center',gap:8,minHeight:72},imageSwatch:{overflow:'hidden',backgroundColor:colors.ink},swatchImage:{position:'absolute',width:'100%',height:'100%'},swatchCheck:{color:'#fff',fontSize:20,textShadowColor:'#000',textShadowRadius:4},imagePreview:{height:136,borderRadius:14,overflow:'hidden',justifyContent:'center',alignItems:'center',backgroundColor:'#181818'},imagePreviewText:{fontFamily:'serif',fontSize:20,color:'#fff'},blurHeading:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},blurSlider:{width:'100%',height:44,marginTop:8},blurLabels:{flexDirection:'row',justifyContent:'space-between'},imageHelp:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},imageGrid:{flexDirection:'row',flexWrap:'wrap',gap:10},imageOption:{width:72,height:92,borderRadius:12,overflow:'hidden',borderWidth:2,borderColor:'transparent'},imageOptionSelected:{borderColor:colors.accent},imageThumbnail:{width:'100%',height:'100%'},imageCheck:{position:'absolute',right:4,top:4,width:22,height:22,borderRadius:11,backgroundColor:colors.accent,alignItems:'center',justifyContent:'center'},imageCheckText:{color:colors.onAccent,fontSize:14,fontWeight:'700'},addImages:{alignSelf:'flex-start',paddingVertical:10,paddingHorizontal:16,borderRadius:20,backgroundColor:colors.white},addImagesText:{color:colors.accent,fontWeight:'600'},swatch:{width:48,height:48,borderRadius:24,borderWidth:2,alignItems:'center',justifyContent:'center'},doneButton:{alignItems:'center'},main:{flex:1},fixedBackground:{position:'absolute',top:0,right:0,bottom:0,left:0,overflow:'hidden',backgroundColor:'#181818'},backgroundImage:{width:'100%',height:'100%'},backgroundScrim:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'rgba(0,0,0,0.64)'},transparentPage:{backgroundColor:'transparent'},imagePassage:{color:'#ffffff'},imageReference:{color:'#ffffff'},page:{backgroundColor:colors.paper,paddingHorizontal:28,paddingTop:24,paddingBottom:24},eyebrow:{fontSize:10,fontWeight:'700',letterSpacing:1.6,color:colors.accent},reading:{flex:1},readingContent:{flexGrow:1,justifyContent:'center',paddingVertical:24},passage:{fontSize:26,lineHeight:39,color:colors.ink,fontFamily:'serif'},passageInput:{padding:0,margin:0,textAlignVertical:'top'},referenceGroup:{alignItems:'flex-start',gap:12,flex:1},lookupButton:{maxWidth:'100%',paddingHorizontal:16,paddingVertical:10,borderRadius:20,backgroundColor:colors.white},lookupText:{fontSize:14,fontWeight:'600',color:colors.accent},reference:{fontSize:14,color:colors.muted},pageBottom:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:16},actions:{flexDirection:'column',gap:8},hiddenActions:{opacity:0},action:{width:44,height:44,borderRadius:22,backgroundColor:colors.white,alignItems:'center',justifyContent:'center'},heart:{fontSize:22,color:colors.accent},noteIcon:{fontSize:20,color:colors.ink},section:{flex:1,paddingHorizontal:28,paddingTop:12},title:{fontFamily:'serif',fontSize:32,color:colors.ink,marginTop:8,marginBottom:24},row:{paddingVertical:20,borderBottomWidth:1,borderColor:colors.line,flexDirection:'row',alignItems:'center',gap:16},rowLabel:{fontSize:10,letterSpacing:1,color:colors.accent,fontWeight:'700'},rowTitle:{fontSize:18,lineHeight:26,color:colors.ink,marginTop:8,fontFamily:'serif'},bookDetail:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},chapterProgress:{marginTop:16,gap:8},progressLabels:{flexDirection:'row',justifyContent:'space-between',gap:8},progressText:{fontSize:13,color:colors.muted},progressTrack:{height:4,borderRadius:2,backgroundColor:colors.line,overflow:'hidden'},progressFill:{height:'100%',borderRadius:2,backgroundColor:colors.accent},arrow:{fontSize:22,color:colors.muted},empty:{color:colors.muted,lineHeight:24,marginTop:24},nav:{flexDirection:'row',borderTopWidth:1,borderColor:colors.line,backgroundColor:colors.white,paddingVertical:12},navItem:{flex:1,alignItems:'center',padding:8},navText:{fontSize:13,color:colors.muted},navActive:{color:colors.accent,fontWeight:'700'},dot:{width:4,height:4,borderRadius:2,marginTop:6},dotActive:{backgroundColor:colors.accent},overlay:{flex:1,backgroundColor:'#0007',justifyContent:'flex-end'},dictionaryOverlay:{flex:1,justifyContent:'flex-end'},dictionaryBackdrop:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'#0007'},dictionarySheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,paddingHorizontal:24,paddingBottom:32,maxHeight:'75%'},dictionaryContent:{gap:20,paddingTop:8,paddingBottom:16},dictionaryLoading:{flexDirection:'row',alignItems:'center',gap:12},dictionaryGroup:{gap:10},dictionaryBody:{fontSize:16,lineHeight:24,color:colors.ink},dictionaryMeta:{fontSize:13,lineHeight:20,color:colors.muted},dictionaryLink:{fontSize:14,color:colors.accent,fontWeight:'600'},sheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,padding:24},input:{minHeight:120,textAlignVertical:'top',backgroundColor:colors.paper,borderRadius:12,padding:16,color:colors.ink,fontSize:16},sheetActions:{flexDirection:'row',justifyContent:'flex-end',gap:12,marginTop:16},button:{paddingVertical:12,paddingHorizontal:18,borderRadius:20},buttonPrimary:{backgroundColor:colors.accent}});
+const createStyles = (colors: Palette) => StyleSheet.create({root:{flex:1,backgroundColor:colors.paper},loading:{flex:1,justifyContent:'center',backgroundColor:colors.paper},downloadBanner:{minHeight:48,flexDirection:"row",alignItems:"center",paddingHorizontal:20,gap:12,backgroundColor:colors.white},downloadBannerText:{flex:1,color:colors.ink,fontSize:14},downloadCancel:{color:colors.accent,fontSize:14,fontWeight:"600"},header:{paddingHorizontal:16,paddingTop:8,paddingBottom:8,flexDirection:'row',justifyContent:'space-between',alignItems:'center',borderBottomWidth:1,borderColor:colors.line},language:{paddingVertical:10,paddingHorizontal:14,backgroundColor:colors.white,borderRadius:24},languageText:{fontWeight:'600',color:colors.ink},readerBack:{fontSize:34,lineHeight:40,color:colors.ink},playbackStatus:{minHeight:30,alignItems:"center",justifyContent:"center",paddingBottom:6},readerMenuOverlay:{position:"absolute",top:0,right:0,bottom:0,left:0,justifyContent:"flex-end",zIndex:10},readerMenuBackdrop:{position:"absolute",top:0,right:0,bottom:0,left:0,backgroundColor:"#0007"},readerMenuTitle:{fontFamily:"serif",fontSize:22,color:colors.ink,marginBottom:8},readerMenuItem:{flex:1,fontSize:16,fontWeight:"600",color:colors.ink},profileButton:{width:44,height:44,borderRadius:22,alignItems:'center',justifyContent:'center'},profileGlyph:{width:24,height:24,transform:[{scale:0.85}]},profileHead:{position:'absolute',top:1,left:8,width:8,height:8,borderWidth:1.5,borderColor:colors.ink,borderRadius:4},profileShoulders:{position:'absolute',bottom:2,left:3,width:18,height:10,borderWidth:1.5,borderColor:colors.ink,borderTopLeftRadius:10,borderTopRightRadius:10,borderBottomWidth:0},settingsScreen:{flex:1,backgroundColor:colors.paper},settingsNavigationHeader:{minHeight:64,flexDirection:'row',alignItems:'center',paddingHorizontal:16,borderBottomWidth:1,borderColor:colors.line},settingsBackButton:{width:44,height:48,alignItems:'center',justifyContent:'center',marginRight:8},settingsNavigationTitle:{flex:1,fontSize:20,fontWeight:'600',color:colors.ink},settingsList:{paddingHorizontal:24,paddingTop:16,paddingBottom:32},settingsCredits:{paddingTop:24,paddingBottom:16,gap:8},settingsCreditText:{fontSize:13,lineHeight:20,color:colors.muted},settingsCreditLink:{fontSize:13,lineHeight:20,color:colors.accent,textDecorationLine:"underline",alignSelf:"flex-start"},settingsListRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:18,borderBottomWidth:1,borderColor:colors.line},choiceRow:{minHeight:68,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:14,borderBottomWidth:1,borderColor:colors.line},choiceCheck:{fontSize:20,fontWeight:'600',color:colors.accent,minWidth:24,textAlign:'center'},paletteName:{flex:1,fontSize:16,color:colors.ink},paletteSwatches:{flexDirection:'row',gap:6},paletteSwatch:{width:24,height:24,borderRadius:12,borderWidth:1,borderColor:colors.line},colorHints:{gap:10},colorHint:{fontSize:14,lineHeight:21,color:colors.muted},colorHintStrong:{fontWeight:'600',color:colors.ink},settingsHeader:{flexDirection:'row',alignItems:'center',paddingHorizontal:20,paddingVertical:16,borderBottomWidth:1,borderColor:colors.line},settingsTitle:{flex:1,fontFamily:'serif',fontSize:24,color:colors.ink},backIcon:{fontSize:32,color:colors.ink,lineHeight:36},closeIcon:{fontSize:28,color:colors.muted},settingsMenu:{padding:24},settingsMenuRow:{minHeight:80,flexDirection:'row',alignItems:'center',gap:16,padding:20,borderRadius:16,backgroundColor:colors.white},settingsMenuText:{flex:1,gap:6},settingsMenuTitle:{fontSize:16,fontWeight:'600',color:colors.ink},settingsMenuDescription:{fontSize:14,color:colors.muted},settingsChevron:{fontSize:28,color:colors.muted},settingsContent:{gap:32,padding:24},preferenceGroup:{gap:16},preferenceLabel:{fontSize:14,fontWeight:'600',color:colors.ink},sizeOptions:{flexDirection:'row',gap:8},sizeOption:{flex:1,minHeight:88,borderRadius:12,backgroundColor:colors.paper,padding:12,alignItems:'center',justifyContent:'center',gap:8},selectedOption:{backgroundColor:colors.accent},selectedText:{color:colors.onAccent,fontWeight:'600'},sizeSample:{color:colors.ink},optionLabel:{fontSize:13,color:colors.muted},backgroundOption:{flex:1,alignItems:'center',gap:8,minHeight:72},imageSwatch:{overflow:'hidden',backgroundColor:colors.ink},swatchImage:{position:'absolute',width:'100%',height:'100%'},swatchCheck:{color:'#fff',fontSize:20,textShadowColor:'#000',textShadowRadius:4},imagePreview:{height:136,borderRadius:14,overflow:'hidden',justifyContent:'center',alignItems:'center',backgroundColor:'#181818'},imagePreviewText:{fontFamily:'serif',fontSize:20,color:'#fff'},blurHeading:{flexDirection:'row',justifyContent:'space-between',alignItems:'center'},blurSlider:{width:'100%',height:44,marginTop:8},blurLabels:{flexDirection:'row',justifyContent:'space-between'},imageHelp:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},imageGrid:{flexDirection:'row',flexWrap:'wrap',gap:10},imageOption:{width:72,height:92,borderRadius:12,overflow:'hidden',borderWidth:2,borderColor:'transparent'},imageOptionSelected:{borderColor:colors.accent},imageThumbnail:{width:'100%',height:'100%'},imageCheck:{position:'absolute',right:4,top:4,width:22,height:22,borderRadius:11,backgroundColor:colors.accent,alignItems:'center',justifyContent:'center'},imageCheckText:{color:colors.onAccent,fontSize:14,fontWeight:'700'},addImages:{alignSelf:'flex-start',paddingVertical:10,paddingHorizontal:16,borderRadius:20,backgroundColor:colors.white},addImagesText:{color:colors.accent,fontWeight:'600'},swatch:{width:48,height:48,borderRadius:24,borderWidth:2,alignItems:'center',justifyContent:'center'},doneButton:{alignItems:'center'},main:{flex:1},fixedBackground:{position:'absolute',top:0,right:0,bottom:0,left:0,overflow:'hidden',backgroundColor:'#181818'},backgroundImage:{width:'100%',height:'100%'},filteredBackgroundImage:{position:'absolute',width:'100%',height:'100%'},backgroundScrim:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'rgba(0,0,0,0.64)'},transparentPage:{backgroundColor:'transparent'},imagePassage:{color:'#ffffff'},imageReference:{color:'#ffffff'},page:{backgroundColor:colors.paper,paddingHorizontal:28,paddingTop:24,paddingBottom:24},eyebrow:{fontSize:10,fontWeight:'700',letterSpacing:1.6,color:colors.accent},reading:{flex:1},readingContent:{flexGrow:1,justifyContent:'center',paddingVertical:24},passage:{fontSize:26,lineHeight:39,color:colors.ink,fontFamily:'serif',textAlign:'center'},selectionTools:{flexDirection:'row',flexWrap:'wrap',alignItems:'center',gap:8,marginTop:24},selectionButton:{paddingHorizontal:14,paddingVertical:10,borderRadius:20,backgroundColor:colors.white},selectionButtonText:{fontSize:14,fontWeight:'600',color:colors.accent},selectionHint:{fontSize:12,color:colors.muted,flexBasis:'100%',marginTop:2},referenceGroup:{alignItems:'flex-start',gap:12,flex:1},lookupButton:{maxWidth:'100%',paddingHorizontal:16,paddingVertical:10,borderRadius:20,backgroundColor:colors.white},lookupText:{fontSize:14,fontWeight:'600',color:colors.accent},reference:{fontSize:14,color:colors.muted},pageBottom:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:16},actions:{flexDirection:'column',gap:8},hiddenActions:{opacity:0},action:{width:44,height:44,borderRadius:22,backgroundColor:colors.white,alignItems:'center',justifyContent:'center'},heart:{fontSize:22,color:colors.accent},noteIcon:{fontSize:20,color:colors.ink},section:{flex:1,paddingHorizontal:28,paddingTop:12},title:{fontFamily:'serif',fontSize:32,color:colors.ink,marginTop:8,marginBottom:24},row:{paddingVertical:20,borderBottomWidth:1,borderColor:colors.line,flexDirection:'row',alignItems:'center',gap:16},rowLabel:{fontSize:10,letterSpacing:1,color:colors.accent,fontWeight:'700'},rowTitle:{fontSize:18,lineHeight:26,color:colors.ink,marginTop:8,fontFamily:'serif'},bookRow:{minHeight:148,paddingVertical:16,borderBottomWidth:1,borderColor:colors.line,flexDirection:"row",alignItems:"center",gap:18},bookCover:{width:76,height:114,borderRadius:5,backgroundColor:colors.line},bookTitle:{fontSize:19,lineHeight:26,color:colors.ink,fontFamily:"serif"},bookDetail:{fontSize:13,lineHeight:20,color:colors.muted,marginTop:6},chapterProgress:{marginTop:16,gap:8},progressLabels:{flexDirection:'row',justifyContent:'space-between',gap:8},progressText:{fontSize:13,color:colors.muted},progressTrack:{height:4,borderRadius:2,backgroundColor:colors.line,overflow:'hidden'},progressFill:{height:'100%',borderRadius:2,backgroundColor:colors.accent},arrow:{fontSize:22,color:colors.muted},empty:{color:colors.muted,lineHeight:24,marginTop:24},nav:{flexDirection:'row',borderTopWidth:1,borderColor:colors.line,backgroundColor:colors.white,paddingVertical:12},navItem:{flex:1,alignItems:'center',padding:8},navText:{fontSize:13,color:colors.muted},navActive:{color:colors.accent,fontWeight:'700'},dot:{width:4,height:4,borderRadius:2,marginTop:6},dotActive:{backgroundColor:colors.accent},overlay:{flex:1,backgroundColor:'#0007',justifyContent:'flex-end'},dictionaryOverlay:{flex:1,justifyContent:'flex-end'},dictionaryBackdrop:{position:'absolute',top:0,right:0,bottom:0,left:0,backgroundColor:'#0007'},dictionarySheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,paddingHorizontal:24,paddingBottom:32,maxHeight:'75%'},dictionaryContent:{gap:20,paddingTop:8,paddingBottom:16},dictionaryLoading:{flexDirection:'row',alignItems:'center',gap:12},dictionaryGroup:{gap:10},dictionaryBody:{fontSize:16,lineHeight:24,color:colors.ink},dictionaryMeta:{fontSize:13,lineHeight:20,color:colors.muted},dictionaryLink:{fontSize:14,color:colors.accent,fontWeight:'600'},sheet:{backgroundColor:colors.white,borderTopLeftRadius:24,borderTopRightRadius:24,padding:24},input:{minHeight:120,textAlignVertical:'top',backgroundColor:colors.paper,borderRadius:12,padding:16,color:colors.ink,fontSize:16},sheetActions:{flexDirection:'row',justifyContent:'flex-end',gap:12,marginTop:16},button:{paddingVertical:12,paddingHorizontal:18,borderRadius:20},buttonPrimary:{backgroundColor:colors.accent}});
