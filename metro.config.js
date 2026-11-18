@@ -1,6 +1,7 @@
 const { getDefaultConfig } = require('expo/metro-config');
 
 const config = getDefaultConfig(__dirname);
+if (!config.resolver.assetExts.includes('db')) config.resolver.assetExts.push('db');
 if (!config.resolver.assetExts.includes('wasm')) config.resolver.assetExts.push('wasm');
 const enhanceMiddleware = config.server.enhanceMiddleware;
 config.server.enhanceMiddleware = (middleware, metroServer) => {

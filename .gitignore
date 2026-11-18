@@ -45,3 +45,6 @@ yarn-error.*
 # User-supplied book and generated copyrighted content (local prototype only)
 /books/
 src/data/*.local.json
+
+# Prepared book database; include only in internal preview builds.
+assets/books/itihasa.local.db

@@ -5,14 +5,11 @@ export const chapterPositionKey = (bookId: string, chapter: number) => `${chapte
 export const bookPositionKey = (bookId: string) => `book-position:${bookId}`;
 export const SAVE_POSITION_SQL = 'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?), (?, ?)';
 
-/** Copy only valid legacy positions. INSERT OR IGNORE protects already migrated progress. */
 export function legacyGitaPositionCopies(bookId: string, passages: {id: string; chapter: number}[], oldPosition: string | undefined, rows: {key: string; value: string}[]) {
   const copies: {key: string; value: string}[] = [];
   for (const row of rows) {
     const chapter = Number(row.key.slice(CHAPTER_POSITION_PREFIX.length));
-    if (row.key.startsWith(CHAPTER_POSITION_PREFIX) && Number.isInteger(chapter) && passages.some(p => p.chapter === chapter && p.id === row.value)) {
-      copies.push({key:chapterPositionKey(bookId, chapter), value:row.value});
-    }
+    if (row.key.startsWith(CHAPTER_POSITION_PREFIX) && Number.isInteger(chapter) && passages.some(p => p.chapter === chapter && p.id === row.value)) copies.push({key:chapterPositionKey(bookId, chapter), value:row.value});
   }
   const last = passages.find(p => p.id === oldPosition);
   if (last) {
@@ -22,23 +19,32 @@ export function legacyGitaPositionCopies(bookId: string, passages: {id: string; 
   return copies;
 }
 
-type LocatedPassage = { id: string; chapter: number };
-export function chapterResumeIndex(passages: LocatedPassage[], chapter: number, savedId?: string): number {
-  const saved = passages.findIndex(p => p.chapter === chapter && p.id === savedId);
-  return saved >= 0 ? saved : passages.findIndex(p => p.chapter === chapter);
+type LocatedPassage = {id:string; chapter:number};
+type IndexedChapter = {first:number; byId:Map<string,number>; entries:LocatedPassage[]};
+const cache = new WeakMap<LocatedPassage[], Map<number,IndexedChapter>>();
+function indexChapters(passages:LocatedPassage[]) {
+  let index = cache.get(passages);
+  if (index) return index;
+  index = new Map();
+  passages.forEach((p,i) => {
+    let chapter = index!.get(p.chapter);
+    if (!chapter) {chapter={first:i, byId:new Map(), entries:[]}; index!.set(p.chapter,chapter);}
+    chapter.byId.set(p.id,i); chapter.entries.push(p);
+  });
+  cache.set(passages,index);
+  return index;
 }
-
-export function chapterReadingProgress(passages: (LocatedPassage & {label: string})[], chapter: number, savedId?: string) {
-  const entries = passages.filter(p => p.chapter === chapter);
-  const verseNumbers = (label: string) => (label.match(/\d+/g) ?? []).map(Number);
-  const total = Math.max(0, ...entries.flatMap(p => verseNumbers(p.label)));
-  const current = entries.find(p => p.id === savedId);
+export function chapterResumeIndex(passages: LocatedPassage[], chapter:number, savedId?:string):number {
+  const entry = indexChapters(passages).get(chapter);
+  return entry ? (savedId ? entry.byId.get(savedId) ?? entry.first : entry.first) : -1;
+}
+export function chapterReadingProgress(passages:(LocatedPassage & {label:string})[], chapter:number, savedId?:string, unit:'verse'|'passage'='verse') {
+  const entries = (indexChapters(passages).get(chapter)?.entries ?? []) as (LocatedPassage & {label:string})[];
+  const verseNumbers = (label:string) => (label.match(/\d+/g) ?? []).map(Number);
+  const total = Math.max(0,...entries.flatMap(p=>verseNumbers(p.label)));
+  const current = entries.find(p=>p.id===savedId);
   const numbers = current ? verseNumbers(current.label) : [];
-  const at = numbers.length ? Math.min(total, numbers[numbers.length - 1]) : 0;
-  return {
-    percent: total > 0 ? Math.round(at / total * 100) : 0,
-    label: numbers.length
-      ? `${numbers.length > 1 ? 'Verses' : 'Verse'} ${numbers.join('–')} of ${total}`
-      : `Not started · ${total} verses`,
-  };
+  const at = numbers.length ? Math.min(total,numbers[numbers.length-1]) : 0;
+  const singular = unit === 'passage' ? 'Passage' : 'Verse';
+  return {percent:total > 0 ? Math.round(at/total*100) : 0,label:numbers.length ? `${numbers.length > 1 ? singular + 's' : singular} ${numbers.join('–')} of ${total}` : `Not started · ${total} ${unit === 'passage' ? 'passages' : 'verses'}`};
 }
