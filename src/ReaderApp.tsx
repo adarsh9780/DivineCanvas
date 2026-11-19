@@ -9,6 +9,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { Directory, File, Paths } from 'expo-file-system';
 import { gitaImages } from './bookBackgrounds';
+import { READER_WALKTHROUGH_KEY, readerWalkthroughSeen } from './readerWalkthrough';
 import { chapterBackground, chapterImageKey, parseChapterImageOverrides, parseBookImageSeeds, shuffledBookSeed, clearBookImageOverrides, type BookImageSeeds, type ChapterImageOverrides } from './chapterBackgrounds';
 import Svg, { Circle, Path } from 'react-native-svg';
 import { FilterImage } from 'react-native-svg/filter-image';
@@ -87,6 +88,9 @@ export default function App() {
   const list = useRef<FlatList<Passage>>(null);
   const db = useRef<SQLite.SQLiteDatabase | null>(null);
   const [ready, setReady] = useState(false);
+  const [walkthroughSeen,setWalkthroughSeen] = useState(false);
+  const [walkthroughVisible,setWalkthroughVisible] = useState(false);
+  const [walkthroughSaving,setWalkthroughSaving] = useState(false);
   const readerView = useRef<React.ComponentRef<typeof View>>(null);
   const sharing = useRef(false);
   const [sharingId, setSharingId] = useState<string | null>(null);
@@ -340,8 +344,9 @@ export default function App() {
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
       if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
       else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
-      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
+      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
+      setWalkthroughSeen(readerWalkthroughSeen(values[READER_WALKTHROUGH_KEY]));
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
       const savedScrollSeconds = Number(values['auto-scroll-seconds']);
       if (Number.isInteger(savedScrollSeconds) && savedScrollSeconds >= 5 && savedScrollSeconds <= 60) setAutoScrollSeconds(savedScrollSeconds);
@@ -380,6 +385,25 @@ export default function App() {
     preferenceWrites.current = preferenceWrites.current.then(() => setting(key, value))
       .catch(() => Alert.alert(t("Setting could not be saved"), t("Please try selecting it again.")));
   }, [setting, t]);
+  async function finishWalkthrough() {
+    if (walkthroughSaving || !db.current) return;
+    setWalkthroughSaving(true);
+    try {
+      await db.current.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',READER_WALKTHROUGH_KEY,'true');
+      setWalkthroughSeen(true); setWalkthroughVisible(false);
+    } catch {Alert.alert(appLanguage==='hi'?'सहेजा नहीं जा सका':'Could not save',appLanguage==='hi'?'कृपया फिर प्रयास करें।':'Please try again.');}
+    finally {setWalkthroughSaving(false);}
+  }
+  async function resetWalkthrough() {
+    if (walkthroughSaving || !db.current) return;
+    setWalkthroughSaving(true);
+    try {
+      await db.current.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',READER_WALKTHROUGH_KEY,'false');
+      setWalkthroughSeen(false);
+      Alert.alert(appLanguage==='hi'?'परिचय रीसेट हो गया':'Walkthrough reset',appLanguage==='hi'?'अगली बार पुस्तक खोलने पर परिचय दिखाई देगा।':'The walkthrough will appear the next time you open a book.');
+    } catch {Alert.alert(appLanguage==='hi'?'रीसेट नहीं हो सका':'Could not reset',appLanguage==='hi'?'कृपया फिर प्रयास करें।':'Please try again.');}
+    finally {setWalkthroughSaving(false);}
+  }
   function saveImagePreferences(selected: string[], uploaded: UploadedImage[], seed=imageSeed) {
     savePreference('gita-backgrounds', JSON.stringify({seed, selected, uploaded}));
   }
@@ -707,10 +731,10 @@ export default function App() {
   }, [pendingVoiceStart, voiceInstalled, voiceDownload, screen, activeBookId, passages, index, language, settingsPage, readerMenuOpen, appActive, currentPassage, textReady, startNarration, autoScrollEnabled, savePreference]);
 
   useEffect(() => {
-    if (!readAloud || !ready || !textReady || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null) return;
+    if (walkthroughVisible || !readAloud || !ready || !textReady || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null) return;
     const timer = setTimeout(() => { void startNarration(currentPassage); }, 0);
     return () => { clearTimeout(timer); stopNarration(); };
-  }, [readAloud, ready, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, index, passages, currentPassage, textReady, startNarration, stopNarration]);
+  }, [walkthroughVisible, readAloud, ready, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, index, passages, currentPassage, textReady, startNarration, stopNarration]);
 
   function toggleReadAloud(value: boolean) {
     if (!value) { stopReadAloud(); return; }
@@ -726,7 +750,7 @@ export default function App() {
   useEffect(() => () => { speechDownloadAbort.current?.abort(); speechAbort.current?.abort(); const engine=speechEngine.current; if (engine) void engine.dispose(); }, []);
 
   useEffect(() => {
-    if (!ready || !textReady || !autoScrollEnabled || readAloud || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || (index >= passages.length - 1 && !continuationPending)) return;
+    if (walkthroughVisible || !ready || !textReady || !autoScrollEnabled || readAloud || !appActive || screen !== 'read' || settingsPage !== null || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || (index >= passages.length - 1 && !continuationPending)) return;
     const timer = setTimeout(() => {
       if (continuationNavigator.current?.advance()) return;
       const next = index + 1;
@@ -735,7 +759,7 @@ export default function App() {
       rememberPosition(next);
     }, autoScrollSeconds * 1000);
     return () => clearTimeout(timer);
-  }, [ready, autoScrollEnabled, readAloud, autoScrollSeconds, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, selectedWord, narrating, touchingReader, index, interactionCount, rememberPosition, passages.length, textReady, continuationPending]);
+  }, [walkthroughVisible, ready, autoScrollEnabled, readAloud, autoScrollSeconds, appActive, screen, settingsPage, readerMenuOpen, editing, dictionaryWord, sharingId, selectedWord, narrating, touchingReader, index, interactionCount, rememberPosition, passages.length, textReady, continuationPending]);
 
   function jump(i: number) { if (i < 0) return; rememberPosition(i); setScreen('read'); }
   function openBook(book: Book, justDownloaded = false) {
@@ -750,6 +774,7 @@ export default function App() {
     if (!book.languages.includes(language)) setLanguage(book.languages[0]);
     setIndex(next);
     setScreen('read');
+    if (!walkthroughSeen) setWalkthroughVisible(true);
     savePreference('active-book', book.id);
   }
   async function installBook(book:Book) {
@@ -791,7 +816,7 @@ export default function App() {
   const currentBackground = chapterBackground(bookImages,activeImages,activeBook.id,passages[index]?.chapter ?? 1,bookImageSeeds[activeBook.id] ?? imageSeed,chapterOverrides);
   const pickerBackground = chapterBackground(bookImages,activeImages,pickerBookId,pickerChapter,bookImageSeeds[pickerBookId] ?? imageSeed,chapterOverrides);
   const autoScrollFinished = index >= passages.length - 1 && !continuationPending;
-  const autoScrollRunning = ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
+  const autoScrollRunning = !walkthroughVisible && ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
   if (!ready) return <View style={styles.loading}><ActivityIndicator color={colors.accent}/></View>;
   return <SafeAreaView style={styles.root} edges={screen === 'read' ? (immersive ? ['left','right'] : ['top','left','right']) : undefined}
     onTouchStartCapture={startPinch}
@@ -890,6 +915,17 @@ export default function App() {
           <View accessibilityRole="progressbar" accessibilityLabel={`${appLanguage==='hi'?'पढ़ने की स्थिति':'Reading position'}: ${item.progress.label}`} accessibilityValue={{min:0,max:100,now:item.progress.percent}} style={styles.progressTrack}><View style={[styles.progressFill,{width:`${item.progress.percent}%`}]}/></View>
         </View>}</View><Text style={styles.arrow}>↗</Text></Pressable>}/></View>}
     </View>
+    <Modal visible={walkthroughVisible} transparent animationType="fade" onRequestClose={() => void finishWalkthrough()}>
+      <SafeAreaProvider><SafeAreaView style={{flex:1,backgroundColor:'#0009',justifyContent:'center',padding:24}}>
+        <ScrollView contentContainerStyle={{flexGrow:1,justifyContent:'center'}}><View accessibilityViewIsModal style={{backgroundColor:colors.white,borderRadius:20,padding:24,gap:20,maxWidth:480,width:'100%',alignSelf:'center',shadowColor:'#000',shadowOpacity:0.2,shadowRadius:20,shadowOffset:{width:0,height:8},elevation:10}}>
+          <View style={{gap:8}}><Text accessibilityRole="header" style={{fontSize:22,fontWeight:'700',color:colors.ink}}>{appLanguage==='hi'?'पूरी स्क्रीन पर पढ़ें':'Read full screen'}</Text><Text style={{fontSize:15,lineHeight:23,color:colors.muted}}>{appLanguage==='hi'?'पढ़ते समय दो उंगलियों से स्क्रीन पर पिंच करें।':'Use two fingers while reading to change the view.'}</Text></View>
+          <View style={{gap:16}}><View style={{flexDirection:'row',alignItems:'center',gap:16}}><Svg width={38} height={38} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><Path d="M8 8 3 3m0 0v4m0-4h4M16 16l5 5m0 0v-4m0 4h-4"/></Svg><View style={{flex:1,gap:4}}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'उंगलियाँ फैलाएँ':'Spread fingers apart'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'पूरी स्क्रीन पर पढ़ें।':'Hide controls for full-screen reading.'}</Text></View></View>
+          <View style={{flexDirection:'row',alignItems:'center',gap:16}}><Svg width={38} height={38} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><Path d="M3 3l5 5m0 0V4m0 4H4m17 13-5-5m0 0v4m0-4h4"/></Svg><View style={{flex:1,gap:4}}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'उंगलियाँ पास लाएँ':'Pinch fingers together'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'रीडिंग नियंत्रण वापस लाएँ।':'Bring the reading controls back.'}</Text></View></View></View>
+          <Text style={{fontSize:13,lineHeight:20,color:colors.muted}}>{appLanguage==='hi'?'इसे आप सेटिंग में फिर से देख सकते हैं।':'You can reset this guide in Settings.'}</Text>
+          <View style={{flexDirection:'row',alignItems:'center',justifyContent:'flex-end',gap:12,flexWrap:'wrap'}}><Pressable accessibilityRole="button" disabled={walkthroughSaving} onPress={() => void finishWalkthrough()} style={styles.button}><Text style={{fontSize:15,color:colors.muted}}>{appLanguage==='hi'?'छोड़ें':'Skip'}</Text></Pressable><Pressable accessibilityRole="button" disabled={walkthroughSaving} onPress={() => void finishWalkthrough()} style={[styles.button,styles.buttonPrimary]}><Text style={{fontSize:15,fontWeight:'600',color:colors.onAccent}}>{appLanguage==='hi'?'समझ गया':'Got it'}</Text></Pressable></View>
+        </View></ScrollView>
+      </SafeAreaView></SafeAreaProvider>
+    </Modal>
     <Modal visible={sectionMenuOpen} transparent animationType="none" onRequestClose={() => setSectionMenuOpen(false)}>
       <View style={{flex:1}}><Pressable accessibilityRole="button" accessibilityLabel={t("Close section menu")} onPress={() => setSectionMenuOpen(false)} style={{position:'absolute',top:0,bottom:0,left:0,right:0}}/>
         <SafeAreaView pointerEvents="box-none" style={{flex:1}}><View style={{position:'absolute',top:insets.top+58,left:16,width:220,backgroundColor:colors.white,borderColor:colors.line,borderWidth:1,borderRadius:14,overflow:'hidden',shadowColor:'#000',shadowOpacity:0.14,shadowRadius:12,shadowOffset:{width:0,height:5},elevation:8}}>
@@ -950,6 +986,7 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel={appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy'} onPress={() => setSettingsPage('privacy')} style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage === 'hi' ? 'आपका डेटा, डाउनलोड और संपर्क जानकारी।' : 'Your data, downloads and contact information.'}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'पढ़ने का परिचय रीसेट करें':'Reset reading walkthrough'} accessibilityState={{disabled:walkthroughSaving}} disabled={walkthroughSaving} onPress={() => void resetWalkthrough()} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'पढ़ने का परिचय रीसेट करें':'Reset reading walkthrough'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'पुस्तक दोबारा खोलने पर पिंच का परिचय देखें।':'Show the pinch gesture guide the next time you open a book.'}</Text></View><Text style={styles.settingsChevron}>↻</Text></Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel={t("Credits")} onPress={() => setSettingsPage('credits')} style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Credits")}</Text><Text style={styles.settingsMenuDescription}>{t("Books, music, voice and other sources.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
