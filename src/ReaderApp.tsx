@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, LayoutAnimation, Linking, Modal, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, LayoutAnimation, Linking, Modal, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SQLite from 'expo-sqlite';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
@@ -8,7 +8,8 @@ import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { Directory, File, Paths } from 'expo-file-system';
-import { chapterImage, gitaImages } from './bookBackgrounds';
+import { gitaImages } from './bookBackgrounds';
+import { chapterBackground, chapterImageKey, parseChapterImageOverrides, parseBookImageSeeds, shuffledBookSeed, clearBookImageOverrides, type BookImageSeeds, type ChapterImageOverrides } from './chapterBackgrounds';
 import Svg, { Circle, Path } from 'react-native-svg';
 import { FilterImage } from 'react-native-svg/filter-image';
 import type { Filters } from 'react-native-svg/filter-image';
@@ -89,11 +90,20 @@ export default function App() {
   const readerView = useRef<React.ComponentRef<typeof View>>(null);
   const sharing = useRef(false);
   const [sharingId, setSharingId] = useState<string | null>(null);
-  const [settingsPage, setSettingsPage] = useState<'menu' | 'reading' | 'appearance' | 'playback' | 'music' | 'downloads' | 'dictionary' | 'language' | 'credits' | 'privacy' | null>(null);
+  const [settingsPage, setSettingsPage] = useState<'menu' | 'reading' | 'appearance' | 'playback' | 'music' | 'downloads' | 'dictionary' | 'language' | 'credits' | 'privacy' | 'chapter-images' | 'chapter-select' | null>(null);
   const [showIconLicense, setShowIconLicense] = useState(false);
   const [background, setBackground] = useState<Background>('images');
   const [colorTheme, setColorTheme] = useState<ColorTheme>('paper');
   const [imageSeed, setImageSeed] = useState(1);
+  const [chapterOverrides,setChapterOverrides] = useState<ChapterImageOverrides>({});
+  const [bookImageSeeds,setBookImageSeeds] = useState<BookImageSeeds>({});
+  const [shuffleMessage,setShuffleMessage] = useState('');
+  const shuffleMessageTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+  useEffect(() => () => {if (shuffleMessageTimer.current) clearTimeout(shuffleMessageTimer.current);},[]);
+  const [pickerBookId,setPickerBookId] = useState(GITA_BOOK_ID);
+  const [pickerChapter,setPickerChapter] = useState(1);
+  const [chapterSearch,setChapterSearch] = useState('');
+  const [imagePickerReturn,setImagePickerReturn] = useState<'reading'|null>(null);
   const [selectedImages, setSelectedImages] = useState<string[]>(() => gitaImages.map(image => image.id));
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [addingImages, setAddingImages] = useState(false);
@@ -132,8 +142,9 @@ export default function App() {
   const [activeBookId, setActiveBookId] = useState(GITA_BOOK_ID);
   const activeBook = books.find(book => book.id === activeBookId) ?? books[0];
   const {passages, chapters} = activeBook;
-  // Until a book has its own image collection, use its approved cover as its background.
-  const activeImages = useMemo(() => activeBook.id === GITA_BOOK_ID ? bookImages.filter(image => selectedImages.includes(image.id)) : [{id:`${activeBook.id}-cover`,source:activeBook.cover,thumbnail:activeBook.cover}], [activeBook, bookImages, selectedImages]);
+  // The selected pool and uploaded photos are shared by all books.
+  const activeImages = useMemo(() => bookImages.filter(image => selectedImages.includes(image.id)), [bookImages, selectedImages]);
+  const pickerBook = books.find(book => book.id===pickerBookId) ?? books[0];
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(false);
   const [autoScrollSeconds, setAutoScrollSeconds] = useState(15);
   const [readAloud, setReadAloud] = useState(false);
@@ -329,7 +340,7 @@ export default function App() {
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
       if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
       else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
-      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
+      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
       const savedScrollSeconds = Number(values['auto-scroll-seconds']);
@@ -342,6 +353,8 @@ export default function App() {
       if (values['image-tone'] === 'color' || values['image-tone'] === 'monochrome') setImageTone(values['image-tone']);
       const savedBlur = values['image-blur'] === undefined ? NaN : Number(values['image-blur']);
       if (Number.isInteger(savedBlur) && savedBlur >= 0 && savedBlur <= 8) setImageBlur(savedBlur);
+      if (values['chapter-background-overrides']) setChapterOverrides(parseChapterImageOverrides(values['chapter-background-overrides']));
+      if (values['chapter-background-seeds']) setBookImageSeeds(parseBookImageSeeds(values['chapter-background-seeds']));
       if (values['gita-backgrounds']) {
         try {
           const data = JSON.parse(values['gita-backgrounds']) as {seed?: unknown; selected?: unknown; uploaded?: unknown};
@@ -367,8 +380,45 @@ export default function App() {
     preferenceWrites.current = preferenceWrites.current.then(() => setting(key, value))
       .catch(() => Alert.alert(t("Setting could not be saved"), t("Please try selecting it again.")));
   }, [setting, t]);
-  function saveImagePreferences(selected: string[], uploaded: UploadedImage[]) {
-    savePreference('gita-backgrounds', JSON.stringify({seed:imageSeed, selected, uploaded}));
+  function saveImagePreferences(selected: string[], uploaded: UploadedImage[], seed=imageSeed) {
+    savePreference('gita-backgrounds', JSON.stringify({seed, selected, uploaded}));
+  }
+  function openChapterImages(origin:'reading'|null) {
+    setPickerBookId(activeBook.id); setPickerChapter(passages[index]?.chapter ?? 1);
+    setChapterSearch(''); setShuffleMessage(''); setImagePickerReturn(origin); setReaderMenuOpen(false); setSettingsPage('chapter-images');
+  }
+  function updateChapterImage(id:string|null) {
+    const key=chapterImageKey(pickerBookId,pickerChapter);
+    const next={...chapterOverrides};
+    if (id===null) delete next[key]; else next[key]=id;
+    setChapterOverrides(next); savePreference('chapter-background-overrides',JSON.stringify(next));
+    if (id!==null && background!=='images') {setBackground('images'); savePreference('background','images');}
+  }
+  function showShuffleMessage(message:string) {
+    if (shuffleMessageTimer.current) clearTimeout(shuffleMessageTimer.current);
+    setShuffleMessage(message); AccessibilityInfo.announceForAccessibility(message);
+    shuffleMessageTimer.current=setTimeout(() => setShuffleMessage(''),3500);
+  }
+  function shuffleChapterImages(book:Book, preferredChapter?:number) {
+    const chapter=book.chapters.find(item => item.number===preferredChapter) ?? book.chapters[0];
+    if (!chapter || !activeImages.length) return;
+    const previous=bookImageSeeds[book.id] ?? imageSeed;
+    const current=chapterBackground(bookImages,activeImages,book.id,chapter.number,previous,chapterOverrides);
+    const seed=shuffledBookSeed(activeImages,previous,chapter.number,newImageSeed(),current?.id) ?? previous;
+    const nextSeeds={...bookImageSeeds,[book.id]:seed};
+    const nextOverrides=clearBookImageOverrides(chapterOverrides,book.id);
+    // Persist the new order and cleared choices together, after earlier preference writes.
+    preferenceWrites.current=preferenceWrites.current.then(async () => {
+      if (!db.current) throw new Error('Settings unavailable');
+      await db.current.runAsync('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?),(?,?)','chapter-background-seeds',JSON.stringify(nextSeeds),'chapter-background-overrides',JSON.stringify(nextOverrides));
+    }).catch(() => Alert.alert(t("Setting could not be saved"),t("Please try selecting it again.")));
+    setBookImageSeeds(nextSeeds); setChapterOverrides(nextOverrides);
+    showShuffleMessage(activeImages.length<2 ? (appLanguage==='hi'?'केवल एक चित्र चुना गया है।':'Only one image is selected.') : background!=='images' ? (appLanguage==='hi'?'चित्र बदल गए। देखने के लिए पृष्ठभूमि चित्र चालू करें।':'Images shuffled. Turn on image backgrounds to see them.') : (appLanguage==='hi'?`${t(book.title)} के सभी चित्र बदल दिए गए।`:`${t(book.title)} chapter images shuffled.`));
+  }
+  function closeSettingsPage() {
+    if (settingsPage==='chapter-select') {setSettingsPage('chapter-images'); return;}
+    if (settingsPage==='chapter-images') {setSettingsPage(imagePickerReturn); return;}
+    setSettingsPage(settingsPage==='menu' ? null : 'menu');
   }
   function toggleImage(id: string) {
     const next = selectedImages.includes(id) ? selectedImages.filter(value => value !== id) : [...selectedImages, id];
@@ -738,6 +788,8 @@ export default function App() {
     idx: chapterResumeIndex(passages, c.number, chapterPositions[c.number]),
   })), [chapters, passages, chapterPositions, activeBook.progressUnit, appLanguage, localChapter, localProgress]);
   const useBookImages = background === 'images';
+  const currentBackground = chapterBackground(bookImages,activeImages,activeBook.id,passages[index]?.chapter ?? 1,bookImageSeeds[activeBook.id] ?? imageSeed,chapterOverrides);
+  const pickerBackground = chapterBackground(bookImages,activeImages,pickerBookId,pickerChapter,bookImageSeeds[pickerBookId] ?? imageSeed,chapterOverrides);
   const autoScrollFinished = index >= passages.length - 1 && !continuationPending;
   const autoScrollRunning = ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
   if (!ready) return <View style={styles.loading}><ActivityIndicator color={colors.accent}/></View>;
@@ -793,8 +845,8 @@ export default function App() {
         if (tap && Date.now() - tap.time <= 350 && Math.hypot(event.nativeEvent.pageX - tap.x, event.nativeEvent.pageY - tap.y) <= 12) stopReadAloud();
       }}>
       {screen === 'read' && useBookImages && activeImages.length > 0 && <View pointerEvents="none" style={styles.fixedBackground}>
-        <Image source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" />
-        {imageFilters.length > 0 && <FilterImage key={`${width}-${readerHeight}`} source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.filteredBackgroundImage} resizeMode="cover" filters={imageFilters}/>}
+        <Image source={currentBackground?.source} style={styles.backgroundImage} resizeMode="cover" />
+        {imageFilters.length > 0 && <FilterImage key={`${width}-${readerHeight}`} source={currentBackground?.source} style={styles.filteredBackgroundImage} resizeMode="cover" filters={imageFilters}/>}
         <View style={styles.backgroundScrim}/>
       </View>}
       {screen === 'read' ? <FlatList key={`${activeBook.id}-${readerHeight}-${width}`} ref={list} data={passages} extraData={textWindow} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null && !pinching} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item:metadata, index:rowIndex}) => { const loaded = windowRows[rowIndex] ? {...metadata,...windowRows[rowIndex]} : metadata; const item = loaded; const loading = !windowRows[rowIndex]; return <View style={[styles.page, useBookImages && styles.transparentPage, {height: readerHeight,paddingTop:immersive ? Math.max(24,insets.top+12) : 24,paddingBottom:Math.max(24,insets.bottom+12)}]}>
@@ -856,19 +908,22 @@ export default function App() {
         </>}
       </View></View>
     </Modal>
+    {screen==='read' && settingsPage===null && !readerMenuOpen && !!shuffleMessage && <View pointerEvents="none" style={{position:'absolute',top:insets.top+70,alignSelf:'center',maxWidth:'85%',paddingVertical:10,paddingHorizontal:16,borderRadius:22,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line,shadowColor:'#000',shadowOpacity:0.14,shadowRadius:8,shadowOffset:{width:0,height:3},elevation:5}}><Text accessibilityLiveRegion="polite" style={{color:colors.ink,fontSize:14,textAlign:'center'}}>{shuffleMessage}</Text></View>}
     {readerMenuOpen && <View style={styles.readerMenuOverlay}>
       <Pressable accessibilityRole="button" accessibilityLabel={t("Close book menu")} onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
       <View style={styles.sheet}>
         <Text accessibilityRole="header" style={styles.readerMenuTitle}>{t(activeBook.title)}</Text>
         <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Saved verses and notes")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => openChapterImages(null)} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{appLanguage==='hi'?'अध्याय के चित्र':'Chapter images'}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); shuffleChapterImages(activeBook,passages[index]?.chapter);}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{appLanguage==='hi'?'चित्रों को फिर से बदलें':'Shuffle images'}</Text><Text style={styles.settingsChevron}>↻</Text></Pressable>
         <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSettingsPage('menu');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Settings")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
       </View>
     </View>}
-    <Modal visible={settingsPage !== null} animationType="slide" onRequestClose={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')}>
+    <Modal visible={settingsPage !== null} animationType="slide" onRequestClose={closeSettingsPage}>
       <SafeAreaProvider><SafeAreaView style={styles.settingsScreen}>
         <View style={styles.settingsNavigationHeader}>
-          <Pressable accessibilityRole="button" accessibilityLabel={settingsPage === 'menu' ? t("Back to reader") : t("Back to settings")} onPress={() => setSettingsPage(settingsPage === 'menu' ? null : 'menu')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>
-          <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'language' ? t("App language") : settingsPage === 'credits' ? t("Credits") : settingsPage === 'privacy' ? (appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy') : settingsPage === 'reading' ? t("Reading customisation") : settingsPage === 'appearance' ? t("App appearance") : settingsPage === 'playback' ? t("Reading playback") : settingsPage === 'music' ? t("Music") : settingsPage === 'downloads' ? t("Downloaded resources") : settingsPage === 'dictionary' ? t("Dictionary") : t("Settings")}</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={settingsPage === 'menu' ? t("Back to reader") : t("Back to settings")} onPress={closeSettingsPage} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>
+          <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'chapter-images' ? (appLanguage==='hi'?'अध्याय के चित्र':'Chapter images') : settingsPage === 'chapter-select' ? (appLanguage==='hi'?'अध्याय चुनें':'Choose chapter') : settingsPage === 'language' ? t("App language") : settingsPage === 'credits' ? t("Credits") : settingsPage === 'privacy' ? (appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy') : settingsPage === 'reading' ? t("Reading customisation") : settingsPage === 'appearance' ? t("App appearance") : settingsPage === 'playback' ? t("Reading playback") : settingsPage === 'music' ? t("Music") : settingsPage === 'downloads' ? t("Downloaded resources") : settingsPage === 'dictionary' ? t("Dictionary") : t("Settings")}</Text>
         </View>
         {settingsPage === 'menu' ? <ScrollView contentContainerStyle={styles.settingsList}>
           <Pressable accessibilityRole="button" accessibilityLabel={t("App language")} onPress={() => setSettingsPage('language')} style={styles.settingsListRow}>
@@ -987,6 +1042,19 @@ export default function App() {
             <Slider accessibilityLabel={t("Music volume")} accessibilityValue={{min:0,max:100,now:Math.round(musicVolume*100)}} minimumValue={0} maximumValue={1} step={0.01} value={musicVolume} onValueChange={setMusicVolume} onSlidingComplete={value => {setMusicVolume(value); void setting('music-volume', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
 
           </View>
+        </ScrollView> : settingsPage === 'chapter-select' ? <View style={{flex:1,paddingHorizontal:24}}>
+          <TextInput accessibilityLabel={appLanguage==='hi'?'अध्याय खोजें':'Search chapters'} value={chapterSearch} onChangeText={setChapterSearch} placeholder={appLanguage==='hi'?'अध्याय संख्या या नाम खोजें':'Search chapter number or title'} placeholderTextColor={colors.muted} style={{color:colors.ink,borderBottomWidth:1,borderColor:colors.line,paddingVertical:14,fontSize:16}} />
+          <FlatList keyboardShouldPersistTaps="handled" data={pickerBook.chapters.filter(chapter => `${chapter.number} ${chapter.title} ${chapter.detail ?? ''}`.toLowerCase().includes(chapterSearch.trim().toLowerCase()))} keyExtractor={chapter => String(chapter.number)} renderItem={({item}) => <Pressable accessibilityRole="button" accessibilityState={{selected:pickerChapter===item.number}} onPress={() => {setPickerChapter(item.number); setSettingsPage('chapter-images');}} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'अध्याय':'Chapter'} {item.number}</Text><Text style={styles.settingsMenuDescription}>{localChapter(item.title)}</Text></View>{pickerChapter===item.number && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>} />
+        </View> : settingsPage === 'chapter-images' ? <ScrollView contentContainerStyle={styles.settingsContent}>
+          <View><Text style={styles.preferenceLabel}>{appLanguage==='hi'?'पुस्तक':'Book'}</Text><Text style={[styles.settingsMenuTitle,{marginTop:8}]}>{t(pickerBook.title)}</Text><Text style={styles.imageHelp}>{appLanguage==='hi'?'हर पुस्तक और अध्याय का चुनाव अलग से सहेजा जाता है।':'Choices are saved separately for each book and chapter.'}</Text>
+            {imagePickerReturn==='reading' && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{gap:8,paddingVertical:12}}>{books.map(book => <Pressable key={book.id} accessibilityRole="radio" accessibilityState={{checked:pickerBookId===book.id}} onPress={() => {setPickerBookId(book.id);setPickerChapter(book.chapters[0]?.number ?? 1);setShuffleMessage('');}} style={[styles.language,pickerBookId===book.id && styles.selectedOption]}><Text style={[styles.languageText,pickerBookId===book.id && styles.selectedText]}>{t(book.title)}</Text></Pressable>)}</ScrollView>}
+          </View>
+          <Pressable accessibilityRole="button" onPress={() => {setChapterSearch('');setSettingsPage('chapter-select');}} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'अध्याय':'Chapter'} {pickerChapter}</Text><Text style={styles.settingsMenuDescription}>{localChapter(pickerBook.chapters.find(chapter => chapter.number===pickerChapter)?.title ?? '')}</Text></View><Text style={styles.settingsChevron}>›</Text></Pressable>
+          {pickerBackground && <View style={styles.imagePreview}><Image source={pickerBackground.source} style={styles.backgroundImage} resizeMode="cover" /></View>}
+          <View><Text style={styles.preferenceLabel}>{appLanguage==='hi'?'इस अध्याय के लिए चित्र':'Image for this chapter'}</Text><Text style={styles.imageHelp}>{appLanguage==='hi'?'एक चित्र चुनें या अपने आप चुना गया चित्र उपयोग करें।':'Choose an image or use the automatic assignment.'}</Text></View>
+          <Pressable accessibilityRole="radio" accessibilityState={{checked:!chapterOverrides[chapterImageKey(pickerBookId,pickerChapter)]}} onPress={() => updateChapterImage(null)} style={styles.choiceRow}><Text style={styles.paletteName}>{appLanguage==='hi'?'अपने आप चुनें':'Automatic'}</Text>{!chapterOverrides[chapterImageKey(pickerBookId,pickerChapter)] && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
+          <View style={styles.imageGrid}>{bookImages.map((image,i) => {const chosen=chapterOverrides[chapterImageKey(pickerBookId,pickerChapter)]===image.id; return <Pressable key={image.id} accessibilityRole="radio" accessibilityLabel={`${appLanguage==='hi'?'चित्र':'Image'} ${i+1}`} accessibilityState={{checked:chosen}} onPress={() => updateChapterImage(image.id)} style={[styles.imageOption,chosen && styles.imageOptionSelected]}><Image source={image.thumbnail} style={styles.imageThumbnail} resizeMethod="resize"/>{chosen && <View style={styles.imageCheck}><Text style={styles.imageCheckText}>✓</Text></View>}</Pressable>;})}</View>
+          <View><Pressable accessibilityRole="button" onPress={() => shuffleChapterImages(pickerBook,pickerChapter)} style={({pressed}) => [styles.button,{alignSelf:'flex-start',borderWidth:1,borderColor:colors.line,backgroundColor:pressed ? colors.line : 'transparent'}]}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'इस पुस्तक के चित्र बदलें':'Shuffle this book’s images'}</Text></Pressable><Text style={styles.imageHelp}>{appLanguage==='hi'?'इस पुस्तक के सभी अध्यायों के चित्र फिर से चुने जाएँगे, जिनमें आपके चुने चित्र भी शामिल हैं।':'Reshuffles all chapters in this book, including your chosen images.'}</Text>{!!shuffleMessage && <Text accessibilityLiveRegion="polite" style={{color:colors.accent,fontSize:14,fontWeight:'600',marginTop:10}}>{shuffleMessage}</Text>}</View>
         </ScrollView> : settingsPage === 'reading' ? <ScrollView contentContainerStyle={styles.settingsContent}>
           <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>{t("Text size")}</Text><Text style={styles.imageHelp}>{t("Choose a comfortable size for reading.")}</Text></View><View style={styles.sizeOptions}>
             {fontSizes.map((size,i) => <Pressable key={size} accessibilityRole="button" accessibilityLabel={`${[t("Small"),t("Default"),t("Large")][i]} ${appLanguage==='hi'?'अक्षर':'text'}`} accessibilityState={{selected:fontSize===size}} onPress={() => {setFontSize(size); savePreference('font-size',String(size));}} style={[styles.sizeOption,fontSize===size && styles.selectedOption]}><Text style={[styles.sizeSample,{fontSize:18+i*4},fontSize===size && styles.selectedText]}>Aa</Text><Text style={[styles.optionLabel,fontSize===size && styles.selectedText]}>{[t("Small"),t("Default"),t("Large")][i]}</Text></Pressable>)}
@@ -997,10 +1065,11 @@ export default function App() {
               <Pressable accessibilityRole="radio" accessibilityLabel={t("With images")} accessibilityState={{checked:background==='images'}} aria-checked={background==='images'} onPress={() => {setBackground('images'); savePreference('background','images');}} style={styles.choiceRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("With images")}</Text><Text style={styles.settingsMenuDescription}>{t("Show an image behind each chapter.")}</Text></View>{background === 'images' && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
             </View>
           </View>
+          <Pressable accessibilityRole="button" onPress={() => openChapterImages('reading')} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'अध्याय के चित्र':'Chapter images'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'हर अध्याय के लिए चुनें या चित्र बदलें।':'Choose an image for a chapter or shuffle them.'}</Text></View><Text style={styles.settingsChevron}>›</Text></Pressable>
           {background === 'images' && <View style={styles.preferenceGroup}>
             <View><Text style={styles.preferenceLabel}>{t("Image style")}</Text><Text style={styles.imageHelp}>{t("Choose the look of your reading background.")}</Text></View>
             <View style={styles.imagePreview} accessible accessibilityLabel={`${appLanguage==='hi'?'पृष्ठभूमि की झलक':'Background preview'}, ${imageTone === 'color' ? t("Color") : t("Black and white")}, ${t("Blur")} ${imageBlur} / 8`}>
-              <View pointerEvents="none" style={styles.fixedBackground}><FilterImage source={chapterImage(activeImages, passages[index]?.chapter ?? 1, imageSeed)?.source} style={styles.backgroundImage} resizeMode="cover" filters={imageFilters}/><View style={styles.backgroundScrim}/></View>
+              <View pointerEvents="none" style={styles.fixedBackground}><FilterImage source={currentBackground?.source} style={styles.backgroundImage} resizeMode="cover" filters={imageFilters}/><View style={styles.backgroundScrim}/></View>
               <Text style={styles.imagePreviewText}>{t("A moment to read.")}</Text>
             </View>
             <View>
@@ -1011,8 +1080,8 @@ export default function App() {
               <View style={styles.blurLabels}><Text style={styles.optionLabel}>{t("None")}</Text><Text style={styles.optionLabel}>{t("More")}</Text></View>
             </View>
           </View>}
-          {background === 'images' && activeBook.id === GITA_BOOK_ID && <View style={styles.preferenceGroup}>
-            <View><Text style={styles.preferenceLabel}>{t("Chapter images")}</Text><Text style={styles.imageHelp}>{t("Choose images to use throughout this book.")}</Text></View>
+          {background === 'images' && <View style={styles.preferenceGroup}>
+            <View><Text style={styles.preferenceLabel}>{t("Chapter images")}</Text><Text style={styles.imageHelp}>{appLanguage==='hi'?'सभी पुस्तकों में अपने आप चुनने के लिए चित्र।':'Images used for automatic selection across all books.'}</Text></View>
             <View style={styles.imageGrid}>{bookImages.map((image, i) => <Pressable key={image.id} accessibilityRole="checkbox" accessibilityLabel={`${appLanguage === 'hi' ? 'पृष्ठभूमि चित्र' : 'Background image'} ${i + 1}`} accessibilityState={{checked:selectedImages.includes(image.id)}} aria-checked={selectedImages.includes(image.id)} onPress={() => toggleImage(image.id)} style={[styles.imageOption,selectedImages.includes(image.id) && styles.imageOptionSelected]}><Image source={image.thumbnail} style={styles.imageThumbnail} resizeMethod="resize"/>{selectedImages.includes(image.id) && <View style={styles.imageCheck}><Text style={styles.imageCheckText}>✓</Text></View>}</Pressable>)}</View>
             <Pressable accessibilityRole="button" accessibilityState={{busy:addingImages}} disabled={addingImages} onPress={() => void addImages()} style={styles.addImages}><Text style={styles.addImagesText}>{addingImages ? t("Adding images…") : t("+ Add your images")}</Text></Pressable>
           </View>}

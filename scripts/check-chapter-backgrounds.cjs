@@ -1,0 +1,36 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const ts=require(process.cwd()+'/node_modules/typescript');
+function load(file, requireModule) {
+ const source=fs.readFileSync(file,'utf8');
+ const js=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+ const exports={}; new Function('exports','require',js)(exports,requireModule); return exports;
+}
+const assets=load('src/bookBackgrounds.ts',()=>1);
+const api=load('src/chapterBackgrounds.ts',name => {if(name==='./bookBackgrounds')return assets; throw Error(name);});
+const all=[{id:'one'},{id:'two'},{id:'three'}],pool=all.slice(0,2);
+const saved={'gita-hansi:1':'three','itihasa-ramayana:1':'one'};
+const restored=api.parseChapterImageOverrides(JSON.stringify(saved));
+assert.equal(api.chapterBackground(all,pool,'gita-hansi',1,123,restored).id,'three');
+assert.equal(api.chapterBackground(all,pool,'itihasa-ramayana',1,123,restored).id,'one');
+assert.equal(api.chapterBackground(all,pool,'itihasa-mahabharata',1,123,restored).id,assets.chapterImage(pool,1,123).id);
+assert.equal(api.chapterBackground(all,pool,'gita-hansi',1,999,restored).id,'three');
+assert.equal(api.chapterBackground(all,pool,'gita-hansi',1,123,{'gita-hansi:1':'missing'}).id,assets.chapterImage(pool,1,123).id);
+assert.deepEqual(api.parseChapterImageOverrides('{broken'),{});
+assert.deepEqual(api.parseChapterImageOverrides('{"__proto__":"evil","bad:0":"one","gita-hansi:2":5}'),{});
+assert.equal(new Set([1,2].map(n=>assets.chapterImage(pool,n,123).id)).size,2);
+console.log('PASS: chapter image choices survive serialization, remain per book, and override only valid images; shuffle fills automatic chapters without reuse.');
+const seed=api.shuffledBookSeed(pool,123,1,456);
+assert.notEqual(seed,null);
+assert.notEqual(assets.chapterImage(pool,1,seed).id,assets.chapterImage(pool,1,123).id);
+assert.equal(api.shuffledBookSeed(pool.slice(0,1),123,1,456),null);
+assert.deepEqual(api.parseBookImageSeeds('{"gita-hansi":123,"itihasa-ramayana":456,"invalid!":2,"zero":0}'),{'gita-hansi':123,'itihasa-ramayana':456});
+assert.deepEqual(api.parseBookImageSeeds('bad'),{});
+console.log('PASS: a book shuffle changes its automatic assignment and preserves independent saved seeds.');
+const reset=api.clearBookImageOverrides({'gita-hansi:1':'one','gita-hansi:2':'three','itihasa-ramayana:1':'two'},'gita-hansi');
+assert.deepEqual(reset,{'itihasa-ramayana:1':'two'});
+const manual=api.chapterBackground(all,pool,'gita-hansi',1,123,{'gita-hansi:1':'one'}).id;
+const replacementSeed=api.shuffledBookSeed(pool,123,1,456,manual);
+assert.notEqual(assets.chapterImage(pool,1,replacementSeed).id,manual);
+assert.equal(api.shuffledBookSeed(pool.slice(0,1),123,1,456,manual),null);
+console.log('PASS: shuffle resets manual choices only for the selected book and changes the visible chosen image when alternatives exist.');
