@@ -24,6 +24,8 @@ import { StatusBar } from 'expo-status-bar';
 import { usePathname, useRouter } from 'expo-router';
 import { ReaderSectionsContext, type SettingsPage } from './ReaderSections';
 import { sharePassageImage } from './shareImage';
+import { DEFAULT_MUSIC_ID, MUSIC_TRACKS, downloadMusic, musicDownloaded, musicUri, removeMusic, type MusicTrack } from './musicLibrary';
+import { moveMusic, nextMusic, normalizeMusicOrder } from './musicQueue';
 import { speechEngines, defaultSpeechEngineId } from './speech';
 import type { GeneratedSpeech, SpeechEngine } from './speech/engine';
 import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
@@ -198,6 +200,13 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const runtimeAvailable = Platform.OS !== 'web' && !!NativeModules.Onnxruntime;
   const [musicEnabled, setMusicEnabled] = useState(true);
   const [musicVolume, setMusicVolume] = useState(0.2);
+  const [musicOrder,setMusicOrder] = useState<string[]>(() => MUSIC_TRACKS.map(track => track.id));
+  const [musicShuffle,setMusicShuffle] = useState(false);
+  const [downloadedMusic,setDownloadedMusic] = useState<Record<string,boolean>>(() => Object.fromEntries(MUSIC_TRACKS.map(track => [track.id,musicDownloaded(track)])));
+  const [musicDownloads,setMusicDownloads] = useState<Record<string,number>>({});
+  const [currentMusic,setCurrentMusic] = useState(DEFAULT_MUSIC_ID);
+  const musicQueue = useMemo(() => musicOrder.filter(id => downloadedMusic[id]),[musicOrder,downloadedMusic]);
+  const musicAdvancePending = useRef(false);
   const [appActive, setAppActive] = useState(AppState.currentState == null || AppState.currentState === 'active');
   const musicPlayer = useAudioPlayer(require('../assets/audio/krishna-flute.mp3'));
   const musicStatus = useAudioPlayerStatus(musicPlayer);
@@ -214,7 +223,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
 
 
   function retryMusic() {
-    musicPlayer.replace(require('../assets/audio/krishna-flute.mp3'));
+    const track=MUSIC_TRACKS.find(item => item.id===currentMusic);
+    const uri=track && musicUri(track);
+    musicPlayer.replace(uri ? {uri} : require('../assets/audio/krishna-flute.mp3'));
     setMusicError(false);
     setMusicAttempt(attempt => attempt + 1);
   }
@@ -224,10 +235,27 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     return () => subscription.remove();
   }, []);
   useEffect(() => {
-    // Expo Audio exposes playback configuration through mutable native player properties.
-    musicPlayer.loop = true;
+    musicPlayer.loop = musicQueue.length <= 1;
     musicPlayer.volume = narrating ? musicVolume * 0.5 : musicVolume;
-  }, [musicPlayer, musicVolume, narrating]);
+  }, [musicPlayer, musicVolume, narrating, musicQueue.length]);
+  useEffect(() => {
+    const timer=setTimeout(() => {
+      const track=MUSIC_TRACKS.find(item => item.id===currentMusic);
+      const uri=track && musicUri(track);
+      musicAdvancePending.current=false;
+      musicPlayer.replace(uri ? {uri} : require('../assets/audio/krishna-flute.mp3'));
+      setMusicError(false); setMusicAttempt(attempt => attempt+1);
+    },0);
+    return () => clearTimeout(timer);
+  },[musicPlayer,currentMusic]);
+  useEffect(() => {
+    const subscription=musicPlayer.addListener('playbackStatusUpdate',status => {
+      if (!status.didJustFinish || musicAdvancePending.current || !musicEnabled || !appActive || !isBooksActive || screen!=='read') return;
+      const next=nextMusic(musicQueue,currentMusic,musicShuffle);
+      if (next && next!==currentMusic) {musicAdvancePending.current=true; setCurrentMusic(next);}
+    });
+    return () => subscription.remove();
+  },[musicPlayer,musicQueue,currentMusic,musicShuffle,musicEnabled,appActive,isBooksActive,screen]);
   useEffect(() => {
     let cancelled = false;
     if (ready && musicEnabled && appActive && isBooksActive && screen === 'read' && musicStatus.isLoaded && !musicFailed) {
@@ -375,7 +403,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
       if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
       else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
-      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
+      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'music-order', 'music-shuffle', 'music-current', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
       setWalkthroughSeen(readerWalkthroughSeen(values[READER_WALKTHROUGH_KEY]));
       setDefaultImmersive(values['default-fullscreen'] === 'true');
@@ -383,6 +411,10 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       const savedScrollSeconds = Number(values['auto-scroll-seconds']);
       if (Number.isInteger(savedScrollSeconds) && savedScrollSeconds >= 5 && savedScrollSeconds <= 60) setAutoScrollSeconds(savedScrollSeconds);
       if (values['music-enabled'] === 'false') setMusicEnabled(false);
+      if (values['music-shuffle'] === 'true') setMusicShuffle(true);
+      const savedMusic=MUSIC_TRACKS.find(track => track.id===values['music-current']);
+      if (savedMusic && musicDownloaded(savedMusic)) setCurrentMusic(savedMusic.id);
+      try {setMusicOrder(normalizeMusicOrder(values['music-order'] ? JSON.parse(values['music-order']) : null,MUSIC_TRACKS.map(track => track.id)));} catch {setMusicOrder(MUSIC_TRACKS.map(track => track.id));}
       const savedVolume = values['music-volume'] === undefined ? NaN : Number(values['music-volume']);
       if (Number.isFinite(savedVolume) && savedVolume >= 0 && savedVolume <= 1) setMusicVolume(savedVolume);
       const appearance = parseAppearance(values.background, values['font-size'], values['color-theme']);
@@ -417,6 +449,26 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     preferenceWrites.current = preferenceWrites.current.then(() => setting(key, value))
       .catch(() => Alert.alert(t("Setting could not be saved"), t("Please try selecting it again.")));
   }, [setting, t]);
+  async function installMusic(track:MusicTrack) {
+    if (musicDownloads[track.id]!==undefined || musicDownloaded(track)) return;
+    setMusicDownloads(current => ({...current,[track.id]:0}));
+    try {
+      await downloadMusic(track,progress => setMusicDownloads(current => ({...current,[track.id]:progress})));
+      setDownloadedMusic(current => ({...current,[track.id]:true}));
+    } catch (error) {Alert.alert(appLanguage==='hi'?'संगीत डाउनलोड नहीं हो सका':'Could not download music',error instanceof Error ? error.message : t('Please try again.'));}
+    finally {setMusicDownloads(current => {const next={...current}; delete next[track.id]; return next;});}
+  }
+  function deleteMusic(track:MusicTrack) {
+    try {
+      if (currentMusic===track.id) {setCurrentMusic(DEFAULT_MUSIC_ID); savePreference('music-current',DEFAULT_MUSIC_ID);}
+      removeMusic(track); setDownloadedMusic(current => ({...current,[track.id]:false}));
+    } catch {Alert.alert(appLanguage==='hi'?'संगीत हटाया नहीं जा सका':'Could not remove music',t('Please try again.'));}
+  }
+  function reorderMusic(id:string, direction:-1|1) {
+    const index=musicQueue.indexOf(id); const target=musicQueue[index+direction];
+    if (!target) return;
+    const next=moveMusic(musicOrder,id,target); setMusicOrder(next); savePreference('music-order',JSON.stringify(next));
+  }
   async function finishWalkthrough() {
     if (walkthroughSeen || walkthroughSaving || !db.current) return;
     setWalkthroughSaving(true);
@@ -958,8 +1010,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Text style={styles.settingsMenuTitle}>{t("Reading voice")} · {t("Music")}</Text>
             <Text style={styles.settingsCreditText}>{t("Reading voice: Paradee by Sahil Mahendrakar.")}</Text>
             <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/sahilmahendrakar/paradee')} style={styles.settingsCreditLink}>{t("Voice source ↗")}</Text>
-            <Text style={styles.settingsCreditText}>{t("“Krishna Flute Music” by Alex Morgan, licensed under Creative Commons Attribution 4.0.")}</Text>
-            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://freemusicarchive.org/music/alex-morgan/world-devotional-music/krishna-flute-music/')} style={styles.settingsCreditLink}>{t("Music source ↗")}</Text>
+            {MUSIC_TRACKS.map(track => <View key={track.id} style={{gap:4}}><Text style={styles.settingsCreditText}>{track.title} · {track.artist} · CC BY 4.0</Text><Text accessibilityRole="link" onPress={() => void Linking.openURL(track.source)} style={styles.settingsCreditLink}>{t("Music source ↗")}</Text></View>)}
             <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')} style={styles.settingsCreditLink}>{t("License ↗")}</Text>
           </View>
           <View style={styles.settingsCredits}>
@@ -1018,6 +1069,20 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Slider accessibilityLabel={t("Music volume")} accessibilityValue={{min:0,max:100,now:Math.round(musicVolume*100)}} minimumValue={0} maximumValue={1} step={0.01} value={musicVolume} onValueChange={setMusicVolume} onSlidingComplete={value => {setMusicVolume(value); void setting('music-volume', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
 
           </View>
+          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'उपलब्ध गीतों को यादृच्छिक क्रम में चलाएँ।':'Play available tracks in a random order.'}</Text></View><Switch accessibilityLabel={appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'} value={musicShuffle} onValueChange={value => {setMusicShuffle(value); savePreference('music-shuffle',String(value));}} trackColor={{true:colors.accent}}/></View>
+          <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत संग्रह':'Music library'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'गीत चुनें और तीरों से उनका क्रम बदलें।':'Choose a track and use the arrows to change playback order.'}</Text></View>
+          {[...musicQueue,...musicOrder.filter(id => !downloadedMusic[id])].map(id => {
+            const track=MUSIC_TRACKS.find(item => item.id===id); if (!track) return null;
+            const installed=!!downloadedMusic[id], progress=musicDownloads[id], index=musicQueue.indexOf(id);
+            return <View key={id} style={{minHeight:88,flexDirection:'row',alignItems:'center',gap:8,paddingVertical:12,borderBottomWidth:StyleSheet.hairlineWidth,borderColor:colors.line}}>
+              <Pressable accessibilityRole={installed?'radio':'text'} accessibilityState={installed?{checked:currentMusic===id}:undefined} disabled={!installed} onPress={() => {setCurrentMusic(id); savePreference('music-current',id);}} style={{flex:1,gap:4,paddingVertical:4}}>
+                <Text style={{fontSize:16,lineHeight:22,fontWeight:currentMusic===id?'600':'400',color:colors.ink}}>{track.title}</Text>
+                <Text style={{fontSize:13,lineHeight:19,color:colors.muted}}>{track.artist} · {(track.bytes/1000000).toFixed(1)} MB{track.id===DEFAULT_MUSIC_ID ? (appLanguage==='hi'?' · शामिल':' · Included') : ''}{installed && currentMusic===id ? (appLanguage==='hi'?' · चयनित':' · Selected') : ''}</Text>
+              </Pressable>
+              {installed ? <><Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'ऊपर ले जाएँ':'Move up'} ${track.title}`} accessibilityState={{disabled:index===0}} disabled={index===0} onPress={() => reorderMusic(id,-1)} style={{width:44,height:44,alignItems:'center',justifyContent:'center',opacity:index===0?0.3:1}}><SymbolView name={{ios:'chevron.up',android:'keyboard_arrow_up',web:'keyboard_arrow_up'}} size={20} tintColor={colors.ink}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'नीचे ले जाएँ':'Move down'} ${track.title}`} accessibilityState={{disabled:index===musicQueue.length-1}} disabled={index===musicQueue.length-1} onPress={() => reorderMusic(id,1)} style={{width:44,height:44,alignItems:'center',justifyContent:'center',opacity:index===musicQueue.length-1?0.3:1}}><SymbolView name={{ios:'chevron.down',android:'keyboard_arrow_down',web:'keyboard_arrow_down'}} size={20} tintColor={colors.ink}/></Pressable>{id!==DEFAULT_MUSIC_ID && <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'हटाएँ':'Remove'} ${track.title}`} onPress={() => deleteMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent}}>{appLanguage==='hi'?'हटाएँ':'Remove'}</Text></Pressable>}</> : progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{Math.round(progress*100)}%</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>}
+            </View>;
+          })}
+          <Text style={[styles.imageHelp,{paddingVertical:16}]}>{appLanguage==='hi'?'गीत Creative Commons Attribution 4.0 के अंतर्गत हैं। विवरण क्रेडिट में देखें।':'Tracks are licensed under Creative Commons Attribution 4.0. See Credits for sources.'}</Text>
         </ScrollView> : settingsPage === 'chapter-select' ? <View style={{flex:1,paddingHorizontal:24}}>
           <TextInput accessibilityLabel={appLanguage==='hi'?'अध्याय खोजें':'Search chapters'} value={chapterSearch} onChangeText={setChapterSearch} placeholder={appLanguage==='hi'?'अध्याय संख्या या नाम खोजें':'Search chapter number or title'} placeholderTextColor={colors.muted} style={{color:colors.ink,borderBottomWidth:1,borderColor:colors.line,paddingVertical:14,fontSize:16}} />
           <FlatList keyboardShouldPersistTaps="handled" data={pickerBook.chapters.filter(chapter => `${chapter.number} ${chapter.title} ${chapter.detail ?? ''}`.toLowerCase().includes(chapterSearch.trim().toLowerCase()))} keyExtractor={chapter => String(chapter.number)} renderItem={({item}) => <Pressable accessibilityRole="button" accessibilityState={{selected:pickerChapter===item.number}} onPress={() => {setPickerChapter(item.number); closeSettingsPage();}} style={({pressed}) => [styles.settingsListRow, pressed && {opacity:0.65}]}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'अध्याय':'Chapter'} {item.number}</Text><Text style={styles.settingsMenuDescription}>{localChapter(item.title)}</Text></View>{pickerChapter===item.number && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>} />
