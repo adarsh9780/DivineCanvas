@@ -11,6 +11,14 @@
       "autoIncrement": true
     }
   },
+  "submit": {
+    "production": {
+      "android": {
+        "track": "internal",
+        "releaseStatus": "draft"
+      }
+    }
+  },
   "cli": {
     "appVersionSource": "remote"
   }
