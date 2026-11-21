@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccessibilityInfo, ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, LayoutAnimation, Linking, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SQLite from 'expo-sqlite';
-import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { useAudioPlaylist, useAudioPlaylistStatus, type AudioSource } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
@@ -27,12 +27,13 @@ import { usePathname, useRouter } from 'expo-router';
 import { ReaderSectionsContext, type SettingsPage } from './ReaderSections';
 import { sharePassageImage } from './shareImage';
 import { DEFAULT_MUSIC_ID, MUSIC_TRACKS, downloadMusic, musicDownloaded, musicUri, removeMusic, removeRetiredMusic, type MusicTrack } from './musicLibrary';
-import { moveAvailableMusic, musicDropTarget, nextMusic, normalizeMusicOrder, shuffleSelectedMusic, toggleShuffleExclusion } from './musicQueue';
+import { moveAvailableMusic, musicDropTarget, normalizeMusicOrder, shuffleSelectedMusic, toggleShuffleExclusion } from './musicQueue';
 import { MusicReorderRow } from './MusicReorderRow';
 import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
 import { speechEngines, defaultSpeechEngineId } from './speech';
-import type { GeneratedSpeech, SpeechEngine } from './speech/engine';
+import type { SpeechEngine } from './speech/engine';
+import { configureReadingAudio, setReadingMusicVolume, PassageAudioQueue } from './readingAudioSession';
 import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
 import { isParadeeInstalled } from './speech/paradee/storage';
 import { dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
@@ -149,7 +150,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const styles = useMemo(() => createStyles(colors), [colors]);
   const bookImages = useMemo(() => [...gitaImages, ...uploadedImages.map(image => ({id:image.id, source:{uri:new File(Paths.document, 'book-backgrounds', image.filename).uri}, thumbnail:{uri:new File(Paths.document, 'book-backgrounds', image.thumbFilename ?? image.filename).uri}}))], [uploadedImages]);
   const [screen, setScreen] = useState<Screen>('books');
-  const activateBookScreen = useCallback((next:Screen) => {setScreen(next); if (next === 'books') setImmersive(false); if (next === 'read' && savedFromReaderMenu.current) {savedFromReaderMenu.current=false; setReaderMenuOpen(true);}}, []);
   const [immersive, setImmersive] = useState(false);
   const [defaultImmersive, setDefaultImmersive] = useState(false);
   function changeImmersive(value:boolean) {if (value===immersive) return; LayoutAnimation.easeInEaseOut(); setImmersive(value);}
@@ -170,6 +170,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   function finishPinch(event:GestureResponderEvent) {if (event.nativeEvent.touches.length<2) {pinch.current=null; setPinching(false);}}
   const [readerMenuOpen, setReaderMenuOpen] = useState(false);
   const savedFromReaderMenu = useRef(false);
+  const activateBookScreen = useCallback((next:Screen) => {setScreen(next); if (next === 'books') setImmersive(false); if (next === 'read' && savedFromReaderMenu.current) {savedFromReaderMenu.current=false; setReaderMenuOpen(true);}}, [setReaderMenuOpen]);
   const settingsScrollPositions = useRef<Record<string,number>>({});
   function settingsScrollProps(page:string) {return {contentOffset:{x:0,y:settingsScrollPositions.current[page] ?? 0},scrollEventThrottle:16,onScroll:(event:NativeSyntheticEvent<NativeScrollEvent>) => {settingsScrollPositions.current[page]=Math.max(0,event.nativeEvent.contentOffset.y);}};}
   const [activeBookId, setActiveBookId] = useState(GITA_BOOK_ID);
@@ -182,6 +183,11 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const [autoScrollSeconds, setAutoScrollSeconds] = useState(15);
   const [readAloud, setReadAloud] = useState(false);
   const readAloudRef = useRef(false);
+  const [backgroundReadingAudio, setBackgroundReadingAudio] = useState(true);
+  const [narrationOwnsControls, setNarrationOwnsControls] = useState(false);
+  const [remoteReadingPaused, setRemoteReadingPaused] = useState(false);
+  const [remoteMusicPaused, setRemoteMusicPaused] = useState(false);
+
   const currentIndex = useRef(0);
   const [touchingReader, setTouchingReader] = useState(false);
   const [chapterScrubbing,setChapterScrubbing] = useState(false);
@@ -189,25 +195,27 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const continuationNavigator = useRef<{advance:()=>boolean; hasMore:()=>boolean} | null>(null);
   const [continuationPending, setContinuationPending] = useState(false);
   const registerContinuation = useCallback((navigator:{advance:()=>boolean; hasMore:()=>boolean}|null) => {continuationNavigator.current=navigator; setContinuationPending(!!navigator?.hasMore());}, []);
-  const onContinuationChange = useCallback(() => {setContinuationPending(!!continuationNavigator.current?.hasMore()); setInteractionCount(value => value+1);}, []);
+  const onContinuationChange = useCallback(() => {setContinuationPending(!!continuationNavigator.current?.hasMore()); setInteractionCount(value => value+1);}, [setInteractionCount]);
   const speechEngine = useRef<SpeechEngine | null>(null);
-  const speechAbort = useRef<AbortController | null>(null);
-  const speechFile = useRef<GeneratedSpeech | null>(null);
-  const speechReady = useRef(false);
-  const pausedSpeech = useRef<{passageId:string;language:string}|null>(null);
+  const speechWork = useRef<Promise<unknown>>(Promise.resolve());
+  const narrationQueue = useRef<{
+    queue: PassageAudioQueue;
+    bookId: string;
+    background: boolean;
+    language: 'en' | 'hi' | 'sa';
+  } | null>(null);
   const speechDownloadAbort = useRef<AbortController | null>(null);
   const [voiceInstalled, setVoiceInstalled] = useState(() => Platform.OS !== 'web' && isParadeeInstalled());
   const [voiceDownload, setVoiceDownload] = useState<number | null>(null);
-  const [pendingVoiceStart, setPendingVoiceStart] = useState<{bookId:string; passageId:string; language:'en'|'hi'|'sa'; mode:'passage'|'continuous'} | null>(null);
+  const [pendingVoiceStart, setPendingVoiceStart] = useState<{bookId:string; passageId:string; language:'en'|'hi'|'sa'} | null>(null);
   const [dictionaryInstalled, setDictionaryInstalled] = useState(() => dictionaryAvailable());
   const [dictionaryDownload, setDictionaryDownload] = useState<number | null>(null);
   const [narrating, setNarrating] = useState(false);
-  const narrationPlayer = useAudioPlayer(null);
+  const narrationPlayer = useAudioPlaylist({ updateInterval: 250 });
   const runtimeAvailable = Platform.OS !== 'web' && !!NativeModules.Onnxruntime;
   const [musicEnabled, setMusicEnabled] = useState(true);
   const [musicVolume, setMusicVolume] = useState(0.2);
   const [musicOrder,setMusicOrder] = useState<string[]>(() => MUSIC_TRACKS.map(track => track.id));
-  const [musicShuffle,setMusicShuffle] = useState(false);
   const [musicExcluded,setMusicExcluded] = useState<string[]>([]);
   const [downloadedMusic,setDownloadedMusic] = useState<Record<string,boolean>>(() => Object.fromEntries(MUSIC_TRACKS.map(track => [track.id,musicDownloaded(track)])));
   const [musicDownloads,setMusicDownloads] = useState<Record<string,number>>({});
@@ -220,37 +228,44 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const [currentMusic,setCurrentMusic] = useState(DEFAULT_MUSIC_ID);
   const musicQueue = useMemo(() => musicOrder.filter(id => downloadedMusic[id]),[musicOrder,downloadedMusic]);
   const playableMusic = useMemo(() => musicQueue.filter(id => !musicExcluded.includes(id)),[musicQueue,musicExcluded]);
-  const musicAdvancePending = useRef(false);
   const [appActive, setAppActive] = useState(AppState.currentState == null || AppState.currentState === 'active');
-  const selectedTrack=MUSIC_TRACKS.find(track => track.id===currentMusic);
-  const selectedUri=selectedTrack && musicUri(selectedTrack);
-  const musicSource=currentMusic===DEFAULT_MUSIC_ID ? require('../assets/audio/krishna-flute.mp3') : selectedUri ? {uri:selectedUri} : null;
-  // A new source gets its own native player, avoiding stale load state from the previous track.
-  const musicPlayer = useAudioPlayer(musicSource);
-  const reportedMusicStatus = useAudioPlayerStatus(musicPlayer);
-  const musicStatus = reportedMusicStatus.id===musicPlayer.id ? reportedMusicStatus : musicPlayer.currentStatus;
+  const nativeBackgroundAudio = Platform.OS !== 'web' && backgroundReadingAudio;
+  const readingAudioAllowed = appActive || nativeBackgroundAudio;
+  const readingOpen = screen === 'read' && pathname === '/reader';
+  const musicEntries = useMemo(() => playableMusic.flatMap(id => {
+    const track = MUSIC_TRACKS.find(item => item.id === id);
+    if (!track) return [];
+    if (id === DEFAULT_MUSIC_ID) {
+      return [{ track, source: { assetId: require('../assets/audio/krishna-flute.mp3'), name: track.title } as AudioSource }];
+    }
+    const uri = musicUri(track);
+    return uri ? [{ track, source: { uri, name: track.title } as AudioSource }] : [];
+  }), [playableMusic]);
+  const musicPlayer = useAudioPlaylist({ sources: musicEntries.map(entry => entry.source), loop: 'all' });
+  const reportedMusicStatus = useAudioPlaylistStatus(musicPlayer);
+  const musicStatus = reportedMusicStatus.id === musicPlayer.id ? reportedMusicStatus : musicPlayer.currentStatus;
   const [musicError, setMusicError] = useState(false);
   const [musicAttempt, setMusicAttempt] = useState(0);
-  const musicFailed = musicError || !!musicStatus.error;
-  const waitingForMusic = ready && musicEnabled && appActive && isBooksActive && screen === 'read' && !musicStatus.playing && !musicFailed;
+  const musicPaused = remoteReadingPaused || remoteMusicPaused;
+  const waitingForMusic = ready && musicEnabled && appActive && readingOpen && !musicPaused && !musicStatus.isLoaded && !musicError;
+  const musicFailed = musicError;
 
   useEffect(() => {
-    if (!ready || !musicEnabled || !appActive || !isBooksActive || screen !== 'read' || musicStatus.playing || musicFailed) return;
+    if (!waitingForMusic) return;
     const timer = setTimeout(() => setMusicError(true), 60_000);
     return () => clearTimeout(timer);
-  }, [ready, musicEnabled, appActive, isBooksActive, screen, musicStatus.playing, musicFailed, musicAttempt, musicPlayer]);
-
+  }, [waitingForMusic, musicAttempt, musicPlayer]);
 
   function retryMusic() {
-    const track=MUSIC_TRACKS.find(item => item.id===currentMusic);
-    const uri=track && musicUri(track);
-    if (currentMusic!==DEFAULT_MUSIC_ID && !uri) {
-      setDownloadedMusic(current => ({...current,[currentMusic]:false})); setCurrentMusic(DEFAULT_MUSIC_ID);
-      Alert.alert(appLanguage==='hi'?'गीत उपलब्ध नहीं है':'Track unavailable',appLanguage==='hi'?'कृपया इसे फिर से डाउनलोड करें।':'Please download it again.');
+    const uri = musicEntries.find(entry => entry.track.id === currentMusic);
+    if (currentMusic !== DEFAULT_MUSIC_ID && !uri) {
+      setDownloadedMusic(current => ({ ...current, [currentMusic]: false }));
+      setCurrentMusic(DEFAULT_MUSIC_ID);
+      Alert.alert(appLanguage === 'hi' ? 'गीत उपलब्ध नहीं है' : 'Track unavailable', appLanguage === 'hi' ? 'कृपया इसे फिर से डाउनलोड करें।' : 'Please download it again.');
       return;
     }
-    musicPlayer.replace(uri ? {uri} : require('../assets/audio/krishna-flute.mp3'));
     setMusicError(false);
+    musicPlayer.skipTo(Math.max(0, musicPlayer.currentIndex));
     setMusicAttempt(attempt => attempt + 1);
   }
 
@@ -258,30 +273,70 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     const subscription = AppState.addEventListener('change', state => setAppActive(state === 'active'));
     return () => subscription.remove();
   }, []);
+
   useEffect(() => {
-    musicPlayer.loop = playableMusic.length <= 1;
-    musicPlayer.volume = narrating ? musicVolume * 0.5 : musicVolume;
-  }, [musicPlayer, musicVolume, narrating, playableMusic.length]);
-  useEffect(() => {musicAdvancePending.current=false;},[musicPlayer]);
+    if (Platform.OS === 'web') return;
+    narrationPlayer.setRemotePlaybackCompanion(musicEnabled && readingOpen ? musicPlayer : null);
+    return () => narrationPlayer.setRemotePlaybackCompanion(null);
+  }, [narrationPlayer, musicPlayer, musicEnabled, readingOpen]);
+
   useEffect(() => {
-    const subscription=musicPlayer.addListener('playbackStatusUpdate',status => {
-      if (!status.didJustFinish || musicAdvancePending.current || !musicEnabled || !appActive || !isBooksActive || screen!=='read') return;
-      const next=nextMusic(playableMusic,currentMusic,false);
-      if (next && next!==currentMusic) {musicAdvancePending.current=true; setMusicError(false); setCurrentMusic(next);}
+    setReadingMusicVolume(musicPlayer, narrating ? musicVolume * 0.5 : musicVolume);
+  }, [musicPlayer, musicVolume, narrating]);
+
+  useEffect(() => {
+    const index = musicEntries.findIndex(entry => entry.track.id === currentMusic);
+    if (index > -1 && index !== musicPlayer.currentIndex) musicPlayer.skipTo(index);
+  }, [musicEntries, musicPlayer, currentMusic]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const remote = musicPlayer.addListener('remotePlaybackUpdate', ({ playing }) => setRemoteMusicPaused(!playing));
+    const status = musicPlayer.addListener('playlistStatusUpdate', event => {
+      if ('error' in event && event.error) setMusicError(true);
     });
-    return () => subscription.remove();
-  },[musicPlayer,playableMusic,currentMusic,musicShuffle,musicEnabled,appActive,isBooksActive,screen]);
+    const tracks = musicPlayer.addListener('trackChanged', () => {
+      const entry = musicEntries[musicPlayer.currentIndex];
+      if (readingOpen && entry) setCurrentMusic(entry.track.id);
+    });
+    return () => { remote.remove(); status.remove(); tracks.remove(); };
+  }, [musicPlayer, musicEntries, readingOpen]);
+
   useEffect(() => {
-    let cancelled = false;
-    if (ready && musicEnabled && appActive && isBooksActive && screen === 'read' && musicStatus.isLoaded && !musicFailed) {
-      void setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: false, interruptionMode: 'mixWithOthers' })
-        .then(() => { if (!cancelled) musicPlayer.play(); })
-        .catch(error => { if (!cancelled) { console.warn('Unable to start reading music:', error); setMusicError(true); } });
-    } else {
+    if (!ready || !musicEnabled || !readingOpen || !readingAudioAllowed || !musicEntries.length || musicFailed) {
       musicPlayer.pause();
+      return;
     }
-    return () => { cancelled = true; musicPlayer.pause(); };
-  }, [musicPlayer, ready, musicEnabled, appActive, isBooksActive, screen, musicStatus.isLoaded, musicFailed, musicAttempt]);
+    let cancelled = false;
+    void configureReadingAudio(nativeBackgroundAudio).then(() => {
+      if (cancelled || musicPaused || (Platform.OS !== 'web' && narrationPlayer.remoteTransportPaused)) return;
+      if (!musicPlayer.playing) musicPlayer.play();
+    }).catch(error => {
+      if (!cancelled) {
+        console.warn('Unable to start reading music:', error);
+        setMusicError(true);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [musicPlayer, narrationPlayer, ready, musicEnabled, readingAudioAllowed, readingOpen, nativeBackgroundAudio, musicEntries.length, musicPaused, musicFailed, musicAttempt]);
+
+  useEffect(() => {
+    if (!nativeBackgroundAudio || !ready || !readingOpen || !musicEnabled || !musicEntries.length || narrationOwnsControls || musicFailed) return;
+    let cancelled = false;
+    const metadata = () => ({ title: musicEntries[musicPlayer.currentIndex]?.track.title ?? 'DivineCanvas', artist: 'DivineCanvas' });
+    void configureReadingAudio(true).then(() => {
+      if (!cancelled && narrationPlayer.trackCount === 0) {
+        musicPlayer.setActiveForLockScreen(true, metadata(), { showNextTrack: true, showPreviousTrack: true });
+      }
+    }).catch(error => console.warn('Unable to configure music controls:', error));
+    const tracks = musicPlayer.addListener('trackChanged', () => musicPlayer.updateLockScreenMetadata(metadata()));
+    return () => {
+      cancelled = true;
+      tracks.remove();
+      musicPlayer.clearLockScreenControls();
+    };
+  }, [musicPlayer, narrationPlayer, nativeBackgroundAudio, ready, readingOpen, musicEnabled, musicEntries, narrationOwnsControls, musicFailed]);
+
   const [saved, setSaved] = useState<Saved>({});
   const [notes, setNotes] = useState<Record<string,string>>({});
   const pendingLikes = useRef(new Set<string>());
@@ -419,15 +474,15 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
       if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
       else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
-      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'music-order', 'music-shuffle', 'music-excluded', 'music-current', 'auto-scroll-enabled', 'auto-scroll-seconds')");
+      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'music-order', 'music-excluded', 'music-current', 'background-reading-audio', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
       setWalkthroughSeen(readerWalkthroughSeen(values[READER_WALKTHROUGH_KEY]));
       setDefaultImmersive(values['default-fullscreen'] === 'true');
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
       const savedScrollSeconds = Number(values['auto-scroll-seconds']);
       if (Number.isInteger(savedScrollSeconds) && savedScrollSeconds >= 5 && savedScrollSeconds <= 60) setAutoScrollSeconds(savedScrollSeconds);
+      if (values['background-reading-audio'] === 'false') setBackgroundReadingAudio(false);
       if (values['music-enabled'] === 'false') setMusicEnabled(false);
-      const shuffleOn=values['music-shuffle']==='true'; setMusicShuffle(shuffleOn);
       let savedOrder=MUSIC_TRACKS.map(track => track.id);
       try {savedOrder=normalizeMusicOrder(values['music-order'] ? JSON.parse(values['music-order']) : null,savedOrder);} catch { /* Use the default order. */ }
       setMusicOrder(savedOrder);
@@ -496,14 +551,16 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       setDownloadedMusic(current => ({...current,[track.id]:false}));
     } catch {Alert.alert(appLanguage==='hi'?'संगीत हटाया नहीं जा सका':'Could not remove music',t('Please try again.'));}
   }
-  function setShuffle(value:boolean) {
-    if (value) {
-      const order=shuffleSelectedMusic(musicOrder,playableMusic);
-      setMusicOrder(order); savePreference('music-order',JSON.stringify(order));
-      const first=order.find(id => playableMusic.includes(id));
-      if (first) {setMusicError(false); setCurrentMusic(first); savePreference('music-current',first);}
+  function shuffleMusic() {
+    const order = shuffleSelectedMusic(musicOrder, playableMusic);
+    setMusicOrder(order);
+    savePreference('music-order', JSON.stringify(order));
+    const first = order.find(id => playableMusic.includes(id));
+    if (first) {
+      setMusicError(false);
+      setCurrentMusic(first);
+      savePreference('music-current', first);
     }
-    setMusicShuffle(value); savePreference('music-shuffle',String(value));
   }
   function selectMusic(track:MusicTrack) {
     const id=track.id;
@@ -518,7 +575,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     const next=moveAvailableMusic(musicOrder,musicQueue,id,target); setMusicOrder(next); savePreference('music-order',JSON.stringify(next));
     const title=MUSIC_TRACKS.find(track => track.id===id)?.title ?? id;
     AccessibilityInfo.announceForAccessibility(`${title}: ${appLanguage==='hi'?'क्रम':'position'} ${next.filter(item => musicQueue.includes(item)).indexOf(id)+1} / ${musicQueue.length}`);
-  },[musicOrder,musicQueue,savePreference,appLanguage]);
+  },[musicOrder,musicQueue,savePreference,appLanguage,setMusicOrder]);
   const reorderMusic=useCallback((id:string, direction:-1|1) => {
     const index=musicQueue.indexOf(id); const target=musicQueue[index+direction];
     if (target) reorderMusicTo(id,target);
@@ -676,7 +733,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     positionWrites.current = positionWrites.current.then(async () => {
       await database.runAsync(SAVE_POSITION_SQL, bookPositionKey(book.id), passage.id, chapterPositionKey(book.id, passage.chapter), passage.id);
     }).catch(() => Alert.alert(t("Reading position could not be saved"), t("Please try opening this passage again.")));
-  }, [activeBookId, setSelectedWord, t]);
+  }, [activeBookId, setSelectedWord, setIndex, setPositionsByBook, setLastByBook, t]);
   async function sharePassage(passage: Passage) {
     if (sharing.current) return;
     const view = readerView.current;
@@ -752,43 +809,48 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     } catch { Alert.alert(t("Could not copy text"), t("Please try again.")); }
   }
   const stopNarration = useCallback(() => {
-    speechAbort.current?.abort(); speechAbort.current = null;
-    speechReady.current = false; pausedSpeech.current = null;
-    narrationPlayer.pause();
-    const file = speechFile.current; speechFile.current = null;
-    if (file) void file.dispose().catch(() => {});
+    const session = narrationQueue.current;
+    narrationQueue.current = null;
+    if (session) {
+      narrationPlayer.clearLockScreenControls();
+      narrationPlayer.resetRemoteTransport();
+      session.queue.dispose();
+    }
+    setNarrationOwnsControls(false);
+    setRemoteReadingPaused(false);
     setNarrating(false);
-  }, [narrationPlayer]);
+  }, [narrationPlayer, setNarrationOwnsControls, setRemoteReadingPaused, setNarrating]);
 
   const stopReadAloud = useCallback(() => {
     readAloudRef.current = false;
     setReadAloud(false);
     stopNarration();
-  }, [stopNarration]);
+  }, [stopNarration, setReadAloud]);
 
   useEffect(() => {
-    const subscription = narrationPlayer.addListener('playbackStatusUpdate', status => {
-      if (status.didJustFinish && speechFile.current) {
-        const shouldAdvance = readAloudRef.current;
-        stopNarration();
-        if (shouldAdvance) {
-          const next = currentIndex.current + 1;
-          if (next < passages.length && list.current) {
-            list.current.scrollToIndex({index:next, animated:true});
-            rememberPosition(next);
-          } else {
-            stopReadAloud();
-          }
-        }
-      } else if (status.error && speechAbort.current) {
+    const positions = narrationPlayer.addListener('trackChanged', () => {
+      // Native insertion/removal can emit intermediate indices. Read the
+      // actual current item after the command has finished.
+      queueMicrotask(() => narrationQueue.current?.queue.syncPosition());
+    });
+    const status = narrationPlayer.addListener('playlistStatusUpdate', event => {
+      if ('error' in event && event.error && narrationQueue.current) {
+        console.warn('Could not play narration:', event.error);
         stopReadAloud();
-        Alert.alert(t("Could not play narration"), status.error);
+      } else if (event.didJustFinish) {
+        narrationQueue.current?.queue.finishTrack();
       }
     });
-    return () => subscription.remove();
-  }, [narrationPlayer, passages, rememberPosition, stopNarration, stopReadAloud, t]);
-
-  useEffect(() => () => { stopNarration(); }, [index, language, screen, appActive, stopNarration]);
+    const remote = narrationPlayer.addListener('remotePlaybackUpdate', ({ playing }) => {
+      if (!narrationQueue.current) return;
+      narrationQueue.current.queue.setRemotePlaying(playing);
+      readAloudRef.current = playing;
+      setReadAloud(playing);
+      setNarrating(playing);
+      setRemoteReadingPaused(!playing);
+    });
+    return () => { positions.remove(); status.remove(); remote.remove(); };
+  }, [narrationPlayer, stopReadAloud]);
 
   const getSpeechEngine = useCallback(async () => {
     if (!speechEngine.current) speechEngine.current = await speechEngines.create(defaultSpeechEngineId);
@@ -806,16 +868,16 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       setPendingVoiceStart(null);
       if (!controller.signal.aborted) Alert.alert(t("Voice download failed"), error instanceof Error ? error.message : t("Please try again."));
     } finally {speechDownloadAbort.current = null; setVoiceDownload(null);}
-  }, [getSpeechEngine, runtimeAvailable, t]);
+  }, [getSpeechEngine, runtimeAvailable, t, setVoiceDownload, setVoiceInstalled, setPendingVoiceStart]);
 
-  const requestVoice = useCallback((passage: Passage, mode: 'passage' | 'continuous') => {
+  const requestVoice = useCallback((passage: Passage) => {
     if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("The offline voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
     if (speechDownloadAbort.current) {Alert.alert(t("Download in progress"), t("The reading voice is already downloading.")); return;}
     Alert.alert(t("Download offline voice?"), t("Download the reading voice once (about 11 MB). It will work offline after installation."), [
       {text:t("Not now"), style:'cancel'},
-      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:activeBookId, passageId:passage.id, language, mode}); void downloadVoice();}},
+      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:activeBookId, passageId:passage.id, language}); void downloadVoice();}},
     ]);
-  }, [activeBookId, downloadVoice, language, runtimeAvailable, t]);
+  }, [activeBookId, downloadVoice, language, runtimeAvailable, t, setPendingVoiceStart]);
 
   function cancelVoiceDownload() {setPendingVoiceStart(null); speechDownloadAbort.current?.abort();}
   function deleteDictionary() {
@@ -830,81 +892,154 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     finally { setDictionaryDownload(null); }
   }
   async function removeVoice() {
-    try {stopReadAloud(); const engine=await getSpeechEngine(); await engine.uninstall(); setVoiceInstalled(false);}
+    try {stopReadAloud(); await speechWork.current; const engine=await getSpeechEngine(); await engine.uninstall(); setVoiceInstalled(false);}
     catch (error) {Alert.alert(t("Could not remove voice"), error instanceof Error ? error.message : t("Please try again."));}
   }
-  const startNarration = useCallback(async (passage: Passage) => {
-    if (!runtimeAvailable || !voiceInstalled) {
-      stopReadAloud();
-      requestVoice(passage, 'passage');
-      return;
-    }
-    const controller=new AbortController(); speechAbort.current=controller; setNarrating(true);
-    try {
-      const engine=await getSpeechEngine();
-      const voice = engine.info.voices.find(candidate => candidate.languages.includes(language));
-      if (!voice) throw new Error(t("No voice is available for this language."));
-      const result=await engine.synthesize({text:passage[language],language,voiceId:voice.id},controller.signal);
-      if (controller.signal.aborted) {await result.dispose(); return;}
-      speechFile.current=result;
-      await setAudioModeAsync({playsInSilentMode:true,shouldPlayInBackground:false,interruptionMode:'mixWithOthers'});
-      if (controller.signal.aborted) return;
-      narrationPlayer.replace({uri:result.uri}); speechReady.current=true; narrationPlayer.play();
-    } catch(error) {
-      if (!controller.signal.aborted) {
-        stopReadAloud();
-        Alert.alert(t("Could not read this passage"), error instanceof Error ? error.message : t("Please try again."));
-      }
-    }
-  }, [getSpeechEngine, language, narrationPlayer, runtimeAvailable, stopReadAloud, voiceInstalled, requestVoice, t]);
+  const narrationAllowed = ready && readingOpen && readingAudioAllowed && !walkthroughVisible &&
+    !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null;
 
   useEffect(() => {
-    if (!pendingVoiceStart || !voiceInstalled || voiceDownload !== null || !textReady) return;
+    const session = narrationQueue.current;
+    if (!session || (narrationAllowed && session.bookId === activeBookId && session.language === language && session.background === nativeBackgroundAudio &&
+        session.queue.position === index)) return;
     const timer = setTimeout(() => {
-      setPendingVoiceStart(null);
-      if (screen !== 'read' || !isBooksActive || activeBookId !== pendingVoiceStart.bookId || passages[index]?.id !== pendingVoiceStart.passageId || language !== pendingVoiceStart.language) return;
-      if (pendingVoiceStart.mode === 'continuous') {
-        if (autoScrollEnabled) {setAutoScrollEnabled(false); savePreference('auto-scroll-enabled', 'false');}
-        readAloudRef.current = true;
-        setReadAloud(true);
-      } else if (isBooksActive && !readerMenuOpen && appActive) {
-        void startNarration(currentPassage);
-      }
+      if (narrationQueue.current === session) stopNarration();
     }, 0);
     return () => clearTimeout(timer);
-  }, [pendingVoiceStart, voiceInstalled, voiceDownload, screen, activeBookId, passages, index, language, isBooksActive, readerMenuOpen, appActive, currentPassage, textReady, startNarration, autoScrollEnabled, savePreference]);
+  }, [narrationAllowed, activeBookId, language, index, nativeBackgroundAudio, stopNarration]);
 
   useEffect(() => {
-    if (walkthroughVisible || !readAloud || !ready || !textReady || !appActive || screen !== 'read' || !isBooksActive || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null) return;
+    if (!pendingVoiceStart || !voiceInstalled || voiceDownload !== null || !textReady || !narrationAllowed) return;
     const timer = setTimeout(() => {
-      const paused=pausedSpeech.current;
-      if (paused && paused.passageId===currentPassage.id && paused.language===language && speechFile.current && speechReady.current) {
-        pausedSpeech.current=null; setNarrating(true); narrationPlayer.play();
-      } else { if (paused) stopNarration(); void startNarration(currentPassage); }
+      setPendingVoiceStart(null);
+      if (activeBookId !== pendingVoiceStart.bookId || passages[index]?.id !== pendingVoiceStart.passageId || language !== pendingVoiceStart.language) return;
+      if (autoScrollEnabled) {
+        setAutoScrollEnabled(false);
+        savePreference('auto-scroll-enabled', 'false');
+      }
+      readAloudRef.current = true;
+      setReadAloud(true);
     }, 0);
-    return () => { clearTimeout(timer); if (!pausedSpeech.current) stopNarration(); };
-  }, [walkthroughVisible, readAloud, ready, appActive, screen, isBooksActive, readerMenuOpen, editing, dictionaryWord, sharingId, index, passages, currentPassage, textReady, language, narrationPlayer, startNarration, stopNarration]);
+    return () => clearTimeout(timer);
+  }, [pendingVoiceStart, voiceInstalled, voiceDownload, textReady, narrationAllowed, activeBookId, passages, index, language, autoScrollEnabled, savePreference]);
+
+  const narrationMetadata = useCallback((position: number) => {
+    const passage = passages[position];
+    const reference = activeBookId === GITA_BOOK_ID
+      ? `${passage.chapter}.${passage.label.replace(/^TEXTS?\s+/i, '')}`
+      : `${passage.chapterTitle} · ${passage.label}`;
+    return { title: `${t(activeBook.title)} · ${reference}`, artist: 'DivineCanvas' };
+  }, [passages, activeBookId, activeBook.title, t]);
+
+  useEffect(() => {
+    if (!narrationAllowed || !readAloud || !textReady || !voiceInstalled || !runtimeAvailable) return;
+    const timer = setTimeout(() => {
+      if (narrationQueue.current || !readAloudRef.current) return;
+      const queue = new PassageAudioQueue({
+        player: narrationPlayer,
+        start: index,
+        count: passages.length,
+        generate: (position, signal) => {
+          const task = speechWork.current.then(async () => {
+            if (signal.aborted) throw new Error('Speech cancelled.');
+            const engine = await getSpeechEngine();
+            const voice = engine.info.voices.find(candidate => candidate.languages.includes(language));
+            if (!voice) throw new Error(t('No voice is available for this language.'));
+            const database = await getTextDb(activeBookId);
+            const row = await database.getFirstAsync<{en:string;hi:string;sa:string}>(
+              'SELECT en, hi, sa FROM passages WHERE position = ?', position
+            );
+            if (signal.aborted) throw new Error('Speech cancelled.');
+            if (!row?.[language]?.trim()) throw new Error(t('Could not read this passage'));
+            return engine.synthesize({ text: row[language], language, voiceId: voice.id }, signal);
+          });
+          speechWork.current = task.catch(() => {});
+          return task;
+        },
+        beforePlay: async () => {
+          await configureReadingAudio(nativeBackgroundAudio);
+          if (narrationQueue.current?.queue !== queue || !nativeBackgroundAudio) return;
+          musicPlayer.clearLockScreenControls();
+          narrationPlayer.setActiveForLockScreen(true, narrationMetadata(currentIndex.current), {
+            showPreviousTrack: true,
+            showNextTrack: true,
+          });
+          setNarrationOwnsControls(true);
+        },
+        onPosition: position => {
+          // Save even if the reader view is unavailable while the phone is locked.
+          rememberPosition(position);
+          if (AppState.currentState === 'active') list.current?.scrollToIndex({ index: position, animated: false });
+        },
+        onFinish: stopReadAloud,
+        onError: error => {
+          stopReadAloud();
+          console.warn('Could not read this passage:', error);
+          if (AppState.currentState === 'active') Alert.alert(t('Could not read this passage'), error instanceof Error ? error.message : t('Please try again.'));
+        },
+      });
+      narrationQueue.current = { queue, bookId: activeBookId, background: nativeBackgroundAudio, language };
+      setNarrating(true);
+      void queue.start();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [narrationAllowed, readAloud, textReady, voiceInstalled, runtimeAvailable, index, passages.length, activeBookId, language, narrationPlayer, getSpeechEngine, getTextDb, nativeBackgroundAudio, musicPlayer, narrationMetadata, rememberPosition, stopReadAloud, t]);
+
+  useEffect(() => {
+    if (!narrationOwnsControls || !nativeBackgroundAudio) return;
+    narrationPlayer.updateLockScreenMetadata(narrationMetadata(index));
+  }, [narrationOwnsControls, nativeBackgroundAudio, narrationPlayer, narrationMetadata, index]);
+
+  useEffect(() => {
+    if (!appActive || !readingOpen) return;
+    const frame = requestAnimationFrame(() => {
+      if (narrationQueue.current) list.current?.scrollToIndex({ index: currentIndex.current, animated: false });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [appActive, readingOpen]);
 
   function toggleReadAloud(value: boolean) {
     if (!value) { stopReadAloud(); return; }
-    if (!runtimeAvailable || !voiceInstalled) {
-      requestVoice(currentPassage, 'continuous');
+    if (!readingOpen) {
+      openBook(activeBook, false, true);
       return;
     }
-    if (!pausedSpeech.current || pausedSpeech.current.passageId!==currentPassage.id || pausedSpeech.current.language!==language) stopNarration();
-    if (autoScrollEnabled) { setAutoScrollEnabled(false); savePreference('auto-scroll-enabled', 'false'); }
+    if (!runtimeAvailable || !voiceInstalled) {
+      requestVoice(currentPassage);
+      return;
+    }
+    if (autoScrollEnabled) {
+      setAutoScrollEnabled(false);
+      savePreference('auto-scroll-enabled', 'false');
+    }
+    if (narrationQueue.current && narrationQueue.current.queue.position === index) {
+      narrationPlayer.resetRemoteTransport();
+      setRemoteReadingPaused(false);
+      narrationQueue.current.queue.resume();
+      setNarrating(true);
+    }
     readAloudRef.current = true;
     setReadAloud(true);
   }
+
   function pauseReadAloud() {
     readAloudRef.current = false;
-    if (speechReady.current && speechFile.current) {
-      pausedSpeech.current={passageId:currentPassage.id,language};
-      narrationPlayer.pause(); setNarrating(false);
-    } else stopNarration();
+    const queue = narrationQueue.current?.queue;
+    if (queue?.hasStarted) {
+      queue.pause();
+      setNarrating(false);
+    } else {
+      stopNarration();
+    }
     setReadAloud(false);
   }
-  useEffect(() => () => { speechDownloadAbort.current?.abort(); speechAbort.current?.abort(); const engine=speechEngine.current; if (engine) void engine.dispose(); }, []);
+
+  useEffect(() => () => {
+    speechDownloadAbort.current?.abort();
+    narrationQueue.current?.queue.dispose();
+    const engine = speechEngine.current;
+    if (engine) void engine.dispose();
+  }, []);
 
   useEffect(() => {
     if (walkthroughVisible || !ready || !textReady || !autoScrollEnabled || readAloud || !appActive || screen !== 'read' || !isBooksActive || readerMenuOpen || editing !== null || dictionaryWord !== null || sharingId !== null || selectedWord !== null || narrating || touchingReader || (index >= passages.length - 1 && !continuationPending)) return;
@@ -935,9 +1070,10 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     });
     return () => cancelAnimationFrame(frame);
   },[isBooksActive,index]);
-  function openBook(book: Book, justDownloaded = false) {
-    if (!justDownloaded && !installedBooks[book.id]) {void installBook(book); return;}
+  function openBook(book: Book, justDownloaded = false, startReading = false) {
+    if (!justDownloaded && !installedBooks[book.id]) {void installBook(book, startReading); return;}
     stopReadAloud();
+    setRemoteMusicPaused(false);
     const resume = book.passages.findIndex(p => p.id === lastByBook[book.id]);
     const next = Math.max(0, resume);
     currentIndex.current = next;
@@ -948,17 +1084,31 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     setIndex(next);
     setImmersive(defaultImmersive);
     setScreen('read');
-    router.push('/reader');
+    if (startReading) {
+      router.navigate('/reader');
+      if (runtimeAvailable && voiceInstalled) {
+        if (autoScrollEnabled) {
+          setAutoScrollEnabled(false);
+          savePreference('auto-scroll-enabled', 'false');
+        }
+        readAloudRef.current = true;
+        setReadAloud(true);
+      } else {
+        requestVoice(book.passages[next]);
+      }
+    } else {
+      router.push('/reader');
+    }
     if (!walkthroughSeen) {setWalkthroughSheetOpen(false); setWalkthroughVisible(true);}
     savePreference('active-book', book.id);
   }
-  async function installBook(book:Book) {
+  async function installBook(book:Book, startReading = false) {
     if (bookDownload) {Alert.alert(t("Download in progress"), t("Please wait for the current book to finish downloading.")); return;}
     setBookDownload({id:book.id,progress:0});
     try {
       await downloadBook(book.id, progress => setBookDownload({id:book.id,progress}));
       setInstalledBooks(current => ({...current,[book.id]:true}));
-
+      if (startReading) openBook(book, true, true);
     } catch (error) {Alert.alert(t("Download failed"), error instanceof Error ? error.message : t("Check your connection and try again."));}
     finally {setBookDownload(null);}
   }
@@ -1103,6 +1253,15 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Use the play button to pause or resume.")}</Text></View>
             <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
+          {Platform.OS !== 'web' && <View style={styles.settingsListRow}>
+            <View style={styles.settingsMenuText}>
+              <Text style={styles.settingsMenuTitle}>{appLanguage === 'hi' ? 'लॉक होने पर ऑडियो जारी रखें' : 'Continue audio when locked'}</Text>
+            </View>
+            <Switch accessibilityLabel={appLanguage === 'hi' ? 'लॉक होने पर ऑडियो जारी रखें' : 'Continue audio when locked'} value={backgroundReadingAudio} onValueChange={value => {
+              setBackgroundReadingAudio(value);
+              savePreference('background-reading-audio', String(value));
+            }} trackColor={{true: colors.accent}} />
+          </View>}
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Paradee voice is available offline.") : t("Download an offline voice (about 11 MB).")}</Text></View>
             {voiceDownload !== null ? <Pressable accessibilityRole="button" accessibilityLabel={t("Cancel voice download")} onPress={cancelVoiceDownload}><Text style={{color:colors.accent}}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={voiceInstalled ? t("Remove reading voice") : t("Download reading voice")} onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={{color:colors.accent,fontWeight:'600'}}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
@@ -1120,14 +1279,14 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
-            <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
+            <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); setRemoteMusicPaused(false); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
           </View>
           <View style={{paddingVertical: 18}}>
             <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>{t("Music volume")}</Text><Text style={styles.settingsMenuDescription}>{Math.round(musicVolume * 100)}%</Text></View>
             <Slider accessibilityLabel={t("Music volume")} accessibilityValue={{min:0,max:100,now:Math.round(musicVolume*100)}} minimumValue={0} maximumValue={1} step={0.01} value={musicVolume} onValueChange={setMusicVolume} onSlidingComplete={value => {setMusicVolume(value); void setting('music-volume', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
 
           </View>
-          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'चुने हुए गीतों का क्रम बदलें।':'Shuffle the order of selected tracks.'}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'चुने हुए गीत शफ़ल करें':'Shuffle selected tracks'} onPress={() => setShuffle(true)} style={{minHeight:44,paddingHorizontal:12,justifyContent:'center'}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'शफ़ल':'Shuffle'}</Text></Pressable></View>
+          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'चुने हुए गीतों का क्रम बदलें।':'Shuffle the order of selected tracks.'}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'चुने हुए गीत शफ़ल करें':'Shuffle selected tracks'} onPress={shuffleMusic} style={{minHeight:44,paddingHorizontal:12,justifyContent:'center'}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'शफ़ल':'Shuffle'}</Text></Pressable></View>
           <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत संग्रह':'Music library'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'गीत चुनें, सुनें या क्रम बदलने के लिए हैंडल खींचें।':'Select tracks to play, preview them, or drag the handle to reorder.'}</Text></View>
           {[...musicQueue,...musicOrder.filter(id => !downloadedMusic[id])].map(id => {
             const track=MUSIC_TRACKS.find(item => item.id===id); if (!track) return null;
@@ -1256,7 +1415,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const readerHeaderLeft = <Pressable accessibilityRole="button" accessibilityLabel={t("Chapters")} onPress={() => router.push('/chapters')} style={styles.profileButton}>
           <SymbolView name={{ios:'list.bullet',android:'list',web:'list'}} tintColor={colors.ink} size={23}/>
         </Pressable>;
-  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
+  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); setRemoteMusicPaused(false); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage === 'hi' ? 'पाठ की भाषा बदलें। वर्तमान:' : 'Switch reading language. Current:'} ${language === 'en' ? t("English") : language === 'hi' ? t("Hindi") : t("Sanskrit")}`} onPress={() => { activeSelection.current = null; setSelectedWord(null); previousWordTap.current = null; const next = activeBook.languages[(activeBook.languages.indexOf(language) + 1) % activeBook.languages.length]; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? t("English ▾") : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
         {Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable> : <MenuView
           title={t(activeBook.title)} style={styles.profileButton}

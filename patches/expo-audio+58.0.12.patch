@@ -1,0 +1,344 @@
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
+index 6c81fce..cd5f115 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
+@@ -1093,6 +1093,18 @@ class AudioModule : Module() {
+         }
+       }
+ 
++      Function("setRemotePlaybackCompanion") { playlist: AudioPlaylist, companion: AudioPlaylist? ->
++        runOnMain { playlist.remotePlaybackCompanion = companion?.let { java.lang.ref.WeakReference(it) } }
++      }
++
++      Function("resetRemoteTransport") { playlist: AudioPlaylist ->
++        runOnMain { playlist.resetRemoteTransport() }
++      }
++
++      Property("remoteTransportPaused") { playlist: AudioPlaylist ->
++        runOnMain { playlist.remoteTransportPaused }
++      }
++
+       Function("setActiveForLockScreen") { ref: AudioPlaylist, active: Boolean, metadata: Metadata?, options: AudioLockScreenOptions? ->
+         runOnMain {
+           ref.setActiveForLockScreen(active, metadata, options)
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlaylist.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlaylist.kt
+index bf3f9c5..4808812 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlaylist.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlaylist.kt
+@@ -50,6 +50,35 @@ class AudioPlaylist(
+ 
+   val currentTrackIndex get() = ref.currentMediaItemIndex
+   val trackCount get() = ref.mediaItemCount
++  var remotePlaybackCompanion: java.lang.ref.WeakReference<AudioPlaylist>? = null
++  var remoteTransportPaused = false
++    private set
++  private var resumeRemoteCompanion = false
++
++  fun resetRemoteTransport() {
++    remoteTransportPaused = false
++    resumeRemoteCompanion = false
++  }
++
++  override fun setRemotePlayback(playing: Boolean) {
++    val companion = remotePlaybackCompanion?.get()
++    if (playing) {
++      requestPlay()
++      if (resumeRemoteCompanion) companion?.requestPlay()
++      resetRemoteTransport()
++    } else {
++      if (!remoteTransportPaused) resumeRemoteCompanion = companion?.ref?.playWhenReady == true
++      remoteTransportPaused = true
++      isPaused = false
++      pause()
++      companion?.let {
++        it.isPaused = false
++        it.pause()
++      }
++    }
++    emit("remotePlaybackUpdate", mapOf("playing" to playing))
++  }
++
+ 
+   private var createMediaItemForSource: ((AudioSource) -> MediaItem?)? = null
+ 
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/LockScreenPlayable.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/LockScreenPlayable.kt
+index 7ac4a57..df5ef6c 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/LockScreenPlayable.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/LockScreenPlayable.kt
+@@ -22,6 +22,10 @@ interface LockScreenPlayable : Playable {
+ 
+   fun assignBasicMediaSession()
+ 
++  fun setRemotePlayback(playing: Boolean) {
++    if (playing) requestPlay() else pause()
++  }
++
+   fun nextTrack() = Unit
+ 
+   fun previousTrack() = Unit
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+index 53c36f7..67162f0 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+@@ -26,7 +26,6 @@ import androidx.media3.session.SessionCommand
+ import expo.modules.audio.AudioLockScreenOptions
+ import expo.modules.audio.LockScreenPlayable
+ import expo.modules.audio.Metadata
+-import expo.modules.audio.PlayRequestingPlayer
+ import expo.modules.audio.getPlaybackServiceErrorMessage
+ import expo.modules.kotlin.AppContext
+ import kotlinx.coroutines.CoroutineScope
+@@ -79,15 +78,15 @@ class AudioControlsService : MediaSessionService() {
+       when (intent?.action) {
+         ACTION_PLAY -> {
+           if (shouldPlayInSilentMode()) {
+-            playable.requestPlay()
++            playable.setRemotePlayback(true)
+           }
+         }
+-        ACTION_PAUSE -> currentPlayer.pause()
++        ACTION_PAUSE -> playable.setRemotePlayback(false)
+         ACTION_TOGGLE ->
+-          if (currentPlayer.isPlaying) {
+-            currentPlayer.pause()
++          if (currentPlayer.playWhenReady) {
++            playable.setRemotePlayback(false)
+           } else if (shouldPlayInSilentMode()) {
+-            playable.requestPlay()
++            playable.setRemotePlayback(true)
+           }
+ 
+         ACTION_SEEK_FORWARD -> seekForward()
+@@ -401,12 +400,24 @@ class AudioControlsService : MediaSessionService() {
+   }
+ 
+   private fun resolveSessionPlayer(playable: LockScreenPlayable, options: AudioLockScreenOptions?): Player {
+-    val player = PlayRequestingPlayer(playable.player) { playable.requestPlay() }
++    val player = playable.player
+     val isLive = options?.isLiveStream ?: playable.isLive
+     val forwardMs = seekIntervalMs(options?.seekForwardIntervalSeconds)
+     val backwardMs = seekIntervalMs(options?.seekBackwardIntervalSeconds)
+ 
+     return object : ForwardingPlayer(player) {
++      override fun play() = playable.setRemotePlayback(true)
++      override fun pause() = playable.setRemotePlayback(false)
++      override fun setPlayWhenReady(playWhenReady: Boolean) = playable.setRemotePlayback(playWhenReady)
++
++      override fun seekToNext() {
++        if (options?.showNextTrack == true && playable.supportsNextTrack) playable.nextTrack() else super.seekToNext()
++      }
++
++      override fun seekToPrevious() {
++        if (options?.showPreviousTrack == true && playable.supportsPreviousTrack) playable.previousTrack() else super.seekToPrevious()
++      }
++
+       override fun getSeekForwardIncrement(): Long = forwardMs
+ 
+       override fun getSeekBackIncrement(): Long = backwardMs
+diff --git a/node_modules/expo-audio/build/AudioModule.types.d.ts b/node_modules/expo-audio/build/AudioModule.types.d.ts
+index 0d63c9b..5322edf 100644
+--- a/node_modules/expo-audio/build/AudioModule.types.d.ts
++++ b/node_modules/expo-audio/build/AudioModule.types.d.ts
+@@ -315,6 +315,7 @@ export type AudioPlaylistEvents = {
+     /** Fired when the playlist's status changes (play/pause/seek/load/track change). */
+     playlistStatusUpdate(status: AudioPlaylistStatus): void;
+     /** Fired when the current track changes (next/previous/skip). */
++    remotePlaybackUpdate(data: { playing: boolean }): void;
+     trackChanged(data: {
+         previousIndex: number;
+         currentIndex: number;
+@@ -334,6 +335,9 @@ export declare class AudioPlaylist extends SharedObject<AudioPlaylistEvents> {
+      * Index of the currently playing track in the playlist.
+      */
+     readonly currentIndex: number;
++    readonly remoteTransportPaused: boolean;
++    setRemotePlaybackCompanion(companion: AudioPlaylist | null): void;
++    resetRemoteTransport(): void;
+     /**
+      * Total number of tracks in the playlist.
+      */
+diff --git a/node_modules/expo-audio/ios/AudioModule.swift b/node_modules/expo-audio/ios/AudioModule.swift
+index 6d26c72..5620dee 100644
+--- a/node_modules/expo-audio/ios/AudioModule.swift
++++ b/node_modules/expo-audio/ios/AudioModule.swift
+@@ -425,6 +425,18 @@ public class AudioModule: Module {
+         playlist.clear()
+       }
+ 
++      Function("setRemotePlaybackCompanion") { (playlist: AudioPlaylist, companion: AudioPlaylist?) in
++        playlist.remotePlaybackCompanion = companion
++      }
++
++      Function("resetRemoteTransport") { (playlist: AudioPlaylist) in
++        playlist.resetRemoteTransport()
++      }
++
++      Property("remoteTransportPaused") { (playlist: AudioPlaylist) in
++        playlist.remoteTransportPaused
++      }
++
+       Function("setActiveForLockScreen") { (playlist: AudioPlaylist, active: Bool, metadata: Metadata?, options: LockScreenOptions?) in
+         playlist.setActiveForLockScreen(active, metadata: metadata, options: options)
+       }
+@@ -432,7 +444,7 @@ public class AudioModule: Module {
+       Function("updateLockScreenMetadata") { (playlist: AudioPlaylist, metadata: Metadata?) in
+         if playlist.isActiveForLockScreen {
+           playlist.metadata = metadata
+-          MediaController.shared.refreshActivePlayable(playlist, options: playlist.lockScreenOptions)
++          MediaController.shared.updateNowPlayingInfo(for: playlist)
+         }
+       }
+ 
+diff --git a/node_modules/expo-audio/ios/AudioPlaylist.swift b/node_modules/expo-audio/ios/AudioPlaylist.swift
+index 38e158f..197cd33 100644
+--- a/node_modules/expo-audio/ios/AudioPlaylist.swift
++++ b/node_modules/expo-audio/ios/AudioPlaylist.swift
+@@ -22,6 +22,33 @@ public class AudioPlaylist: SharedRef<AVQueuePlayer>, Playable, LockScreenPlayab
+ 
+   private var playerItems: [AVPlayerItem?] = []
+   private var previousTrackIndex = 0
++  weak var remotePlaybackCompanion: AudioPlaylist?
++  private(set) var remoteTransportPaused = false
++  private var resumeRemoteCompanion = false
++
++  func resetRemoteTransport() {
++    remoteTransportPaused = false
++    resumeRemoteCompanion = false
++  }
++
++  func setRemotePlayback(playing: Bool) {
++    if playing {
++      play(at: currentRate)
++      if resumeRemoteCompanion, let companion = remotePlaybackCompanion {
++        companion.play(at: companion.currentRate)
++      }
++      resetRemoteTransport()
++    } else {
++      if !remoteTransportPaused {
++        resumeRemoteCompanion = (remotePlaybackCompanion?.ref.rate ?? 0) != 0
++      }
++      remoteTransportPaused = true
++      pause()
++      remotePlaybackCompanion?.pause()
++    }
++    emit(event: "remotePlaybackUpdate", payload: ["playing": playing])
++  }
++
+ 
+   var currentTrackIndex: Int {
+     guard let current = ref.currentItem,
+@@ -167,10 +194,10 @@ public class AudioPlaylist: SharedRef<AVQueuePlayer>, Playable, LockScreenPlayab
+   func add(source: AudioSource) {
+     sources.append(source)
+     let item = AudioUtils.createAVPlayerItem(from: source)
++    playerItems.append(item)
+     if let item {
+       ref.insert(item, after: nil)
+     }
+-    playerItems.append(item)
+     updateStatus(with: ["trackCount": trackCount])
+   }
+ 
+@@ -213,12 +240,10 @@ public class AudioPlaylist: SharedRef<AVQueuePlayer>, Playable, LockScreenPlayab
+         play(at: currentRate)
+       }
+     } else if index < current {
+-      let resumeIndex = current - 1
+-      previousTrackIndex = resumeIndex
+-      rebuildPlaylist(startingAt: resumeIndex)
+-      if wasPlaying {
+-        play(at: currentRate)
+-      }
++      // The item has already left AVQueuePlayer. Shift its logical index
++      // without rebuilding the currently playing item and losing its time.
++      playerItems.remove(at: index)
++      previousTrackIndex = current - 1
+     } else if index < playerItems.count {
+       if let item = playerItems[index] {
+         ref.remove(item)
+@@ -331,6 +356,8 @@ public class AudioPlaylist: SharedRef<AVQueuePlayer>, Playable, LockScreenPlayab
+         }
+         if status == .readyToPlay {
+           self.updateStatus(with: ["isLoaded": true])
++        } else if status == .failed, let error = self.ref.currentItem?.error {
++          self.updateStatus(with: ["error": error.localizedDescription])
+         }
+       }
+       .store(in: &cancellables)
+diff --git a/node_modules/expo-audio/ios/MediaController.swift b/node_modules/expo-audio/ios/MediaController.swift
+index 9b66e45..aaf52f3 100644
+--- a/node_modules/expo-audio/ios/MediaController.swift
++++ b/node_modules/expo-audio/ios/MediaController.swift
+@@ -293,6 +293,19 @@ class MediaController {
+   private static let defaultSkipIntervalSeconds = 10.0
+   private static let minSkipIntervalSeconds = 0.1
+ 
++  private func setRemotePlayback(_ playable: any LockScreenPlayable, playing: Bool) {
++    performOnMain {
++      guard self.activePlayable?.id == playable.id else { return }
++      if let playlist = playable as? AudioPlaylist {
++        playlist.setRemotePlayback(playing: playing)
++      } else if playing {
++        playable.play(at: playable.currentRate > 0 ? playable.currentRate : 1)
++      } else {
++        playable.pause()
++      }
++    }
++  }
++
+   private func enableRemoteCommands(options: LockScreenOptions?) {
+     removeRemoteCommandTargets()
+ 
+@@ -301,7 +314,7 @@ class MediaController {
+         return .commandFailed
+       }
+ 
+-      playable.play(at: Float(playable.currentRate > 0 ? playable.currentRate : 1.0))
++      self?.setRemotePlayback(playable, playing: true)
+       return .success
+     }
+     remoteCommandTargets.append((remoteCommandCenter.playCommand, playTarget))
+@@ -311,7 +324,7 @@ class MediaController {
+         return .commandFailed
+       }
+ 
+-      playable.pause()
++      self?.setRemotePlayback(playable, playing: false)
+       return .success
+     }
+     remoteCommandTargets.append((remoteCommandCenter.pauseCommand, pauseTarget))
+@@ -321,11 +334,7 @@ class MediaController {
+         return .commandFailed
+       }
+ 
+-      if playable.isPlaying {
+-        playable.pause()
+-      } else {
+-        playable.play(at: Float(playable.currentRate > 0 ? playable.currentRate : 1.0))
+-      }
++      self?.setRemotePlayback(playable, playing: !playable.isPlaying)
+       return .success
+     }
+     remoteCommandTargets.append((remoteCommandCenter.togglePlayPauseCommand, togglePlayPauseTarget))
+diff --git a/node_modules/expo-audio/src/AudioModule.types.ts b/node_modules/expo-audio/src/AudioModule.types.ts
+index 3194a8e..182b261 100644
+--- a/node_modules/expo-audio/src/AudioModule.types.ts
++++ b/node_modules/expo-audio/src/AudioModule.types.ts
+@@ -391,6 +391,7 @@ export type AudioPlaylistEvents = {
+   /** Fired when the playlist's status changes (play/pause/seek/load/track change). */
+   playlistStatusUpdate(status: AudioPlaylistStatus): void;
+   /** Fired when the current track changes (next/previous/skip). */
++  remotePlaybackUpdate(data: { playing: boolean }): void;
+   trackChanged(data: { previousIndex: number; currentIndex: number }): void;
+ };
+ 
+@@ -410,6 +411,9 @@ export declare class AudioPlaylist extends SharedObject<AudioPlaylistEvents> {
+    * Index of the currently playing track in the playlist.
+    */
+   readonly currentIndex: number;
++  readonly remoteTransportPaused: boolean;
++  setRemotePlaybackCompanion(companion: AudioPlaylist | null): void;
++  resetRemoteTransport(): void;
+ 
+   /**
+    * Total number of tracks in the playlist.
