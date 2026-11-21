@@ -25,7 +25,8 @@ import { usePathname, useRouter } from 'expo-router';
 import { ReaderSectionsContext, type SettingsPage } from './ReaderSections';
 import { sharePassageImage } from './shareImage';
 import { DEFAULT_MUSIC_ID, MUSIC_TRACKS, downloadMusic, musicDownloaded, musicUri, removeMusic, type MusicTrack } from './musicLibrary';
-import { moveMusic, nextMusic, normalizeMusicOrder } from './musicQueue';
+import { moveAvailableMusic, musicDropTarget, nextMusic, normalizeMusicOrder } from './musicQueue';
+import { MusicReorderRow } from './MusicReorderRow';
 import { speechEngines, defaultSpeechEngineId } from './speech';
 import type { GeneratedSpeech, SpeechEngine } from './speech/engine';
 import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
@@ -204,12 +205,19 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const [musicShuffle,setMusicShuffle] = useState(false);
   const [downloadedMusic,setDownloadedMusic] = useState<Record<string,boolean>>(() => Object.fromEntries(MUSIC_TRACKS.map(track => [track.id,musicDownloaded(track)])));
   const [musicDownloads,setMusicDownloads] = useState<Record<string,number>>({});
+  const [musicDragging,setMusicDragging] = useState(false);
+  const musicRowLayouts=useRef<Record<string,{y:number;height:number}>>({});
   const [currentMusic,setCurrentMusic] = useState(DEFAULT_MUSIC_ID);
   const musicQueue = useMemo(() => musicOrder.filter(id => downloadedMusic[id]),[musicOrder,downloadedMusic]);
   const musicAdvancePending = useRef(false);
   const [appActive, setAppActive] = useState(AppState.currentState == null || AppState.currentState === 'active');
-  const musicPlayer = useAudioPlayer(require('../assets/audio/krishna-flute.mp3'));
-  const musicStatus = useAudioPlayerStatus(musicPlayer);
+  const selectedTrack=MUSIC_TRACKS.find(track => track.id===currentMusic);
+  const selectedUri=selectedTrack && musicUri(selectedTrack);
+  const musicSource=currentMusic===DEFAULT_MUSIC_ID ? require('../assets/audio/krishna-flute.mp3') : selectedUri ? {uri:selectedUri} : null;
+  // A new source gets its own native player, avoiding stale load state from the previous track.
+  const musicPlayer = useAudioPlayer(musicSource);
+  const reportedMusicStatus = useAudioPlayerStatus(musicPlayer);
+  const musicStatus = reportedMusicStatus.id===musicPlayer.id ? reportedMusicStatus : musicPlayer.currentStatus;
   const [musicError, setMusicError] = useState(false);
   const [musicAttempt, setMusicAttempt] = useState(0);
   const musicFailed = musicError || !!musicStatus.error;
@@ -219,12 +227,17 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     if (!ready || !musicEnabled || !appActive || !isBooksActive || screen !== 'read' || musicStatus.playing || musicFailed) return;
     const timer = setTimeout(() => setMusicError(true), 60_000);
     return () => clearTimeout(timer);
-  }, [ready, musicEnabled, appActive, isBooksActive, screen, musicStatus.playing, musicFailed, musicAttempt]);
+  }, [ready, musicEnabled, appActive, isBooksActive, screen, musicStatus.playing, musicFailed, musicAttempt, musicPlayer]);
 
 
   function retryMusic() {
     const track=MUSIC_TRACKS.find(item => item.id===currentMusic);
     const uri=track && musicUri(track);
+    if (currentMusic!==DEFAULT_MUSIC_ID && !uri) {
+      setDownloadedMusic(current => ({...current,[currentMusic]:false})); setCurrentMusic(DEFAULT_MUSIC_ID);
+      Alert.alert(appLanguage==='hi'?'गीत उपलब्ध नहीं है':'Track unavailable',appLanguage==='hi'?'कृपया इसे फिर से डाउनलोड करें।':'Please download it again.');
+      return;
+    }
     musicPlayer.replace(uri ? {uri} : require('../assets/audio/krishna-flute.mp3'));
     setMusicError(false);
     setMusicAttempt(attempt => attempt + 1);
@@ -238,21 +251,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     musicPlayer.loop = musicQueue.length <= 1;
     musicPlayer.volume = narrating ? musicVolume * 0.5 : musicVolume;
   }, [musicPlayer, musicVolume, narrating, musicQueue.length]);
-  useEffect(() => {
-    const timer=setTimeout(() => {
-      const track=MUSIC_TRACKS.find(item => item.id===currentMusic);
-      const uri=track && musicUri(track);
-      musicAdvancePending.current=false;
-      musicPlayer.replace(uri ? {uri} : require('../assets/audio/krishna-flute.mp3'));
-      setMusicError(false); setMusicAttempt(attempt => attempt+1);
-    },0);
-    return () => clearTimeout(timer);
-  },[musicPlayer,currentMusic]);
+  useEffect(() => {musicAdvancePending.current=false;},[musicPlayer]);
   useEffect(() => {
     const subscription=musicPlayer.addListener('playbackStatusUpdate',status => {
       if (!status.didJustFinish || musicAdvancePending.current || !musicEnabled || !appActive || !isBooksActive || screen!=='read') return;
       const next=nextMusic(musicQueue,currentMusic,musicShuffle);
-      if (next && next!==currentMusic) {musicAdvancePending.current=true; setCurrentMusic(next);}
+      if (next && next!==currentMusic) {musicAdvancePending.current=true; setMusicError(false); setCurrentMusic(next);}
     });
     return () => subscription.remove();
   },[musicPlayer,musicQueue,currentMusic,musicShuffle,musicEnabled,appActive,isBooksActive,screen]);
@@ -464,11 +468,20 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       removeMusic(track); setDownloadedMusic(current => ({...current,[track.id]:false}));
     } catch {Alert.alert(appLanguage==='hi'?'संगीत हटाया नहीं जा सका':'Could not remove music',t('Please try again.'));}
   }
-  function reorderMusic(id:string, direction:-1|1) {
+  const reorderMusicTo=useCallback((id:string,target:string) => {
+    if (id===target) return;
+    const next=moveAvailableMusic(musicOrder,musicQueue,id,target); setMusicOrder(next); savePreference('music-order',JSON.stringify(next));
+    const title=MUSIC_TRACKS.find(track => track.id===id)?.title ?? id;
+    AccessibilityInfo.announceForAccessibility(`${title}: ${appLanguage==='hi'?'क्रम':'position'} ${next.filter(item => musicQueue.includes(item)).indexOf(id)+1} / ${musicQueue.length}`);
+  },[musicOrder,musicQueue,savePreference,appLanguage]);
+  const reorderMusic=useCallback((id:string, direction:-1|1) => {
     const index=musicQueue.indexOf(id); const target=musicQueue[index+direction];
-    if (!target) return;
-    const next=moveMusic(musicOrder,id,target); setMusicOrder(next); savePreference('music-order',JSON.stringify(next));
-  }
+    if (target) reorderMusicTo(id,target);
+  },[musicQueue,reorderMusicTo]);
+  const dropMusic=useCallback((id:string,dy:number) => {
+    const target=musicDropTarget(musicQueue,musicRowLayouts.current,id,dy);
+    reorderMusicTo(id,target);
+  },[musicQueue,reorderMusicTo]);
   async function finishWalkthrough() {
     if (walkthroughSeen || walkthroughSaving || !db.current) return;
     setWalkthroughSaving(true);
@@ -1059,7 +1072,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Slider accessibilityLabel={t("Time per passage")} accessibilityValue={{min:5,max:60,now:autoScrollSeconds,text:`${autoScrollSeconds} ${t("seconds")}`}} minimumValue={5} maximumValue={60} step={1} value={autoScrollSeconds} onValueChange={setAutoScrollSeconds} onSlidingComplete={value => {setAutoScrollSeconds(value); savePreference('auto-scroll-seconds', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
             <Text style={styles.settingsMenuDescription}>{t("Timed scrolling pauses while you interact. Read aloud advances after the voice finishes instead.")}</Text>
           </View>
-        </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
             <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
@@ -1070,17 +1083,17 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
 
           </View>
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'उपलब्ध गीतों को यादृच्छिक क्रम में चलाएँ।':'Play available tracks in a random order.'}</Text></View><Switch accessibilityLabel={appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'} value={musicShuffle} onValueChange={value => {setMusicShuffle(value); savePreference('music-shuffle',String(value));}} trackColor={{true:colors.accent}}/></View>
-          <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत संग्रह':'Music library'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'गीत चुनें और तीरों से उनका क्रम बदलें।':'Choose a track and use the arrows to change playback order.'}</Text></View>
+          <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत संग्रह':'Music library'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'गीत चुनें और हैंडल खींचकर क्रम बदलें।':'Tap a track to select it. Drag the handle to change playback order.'}</Text></View>
           {[...musicQueue,...musicOrder.filter(id => !downloadedMusic[id])].map(id => {
             const track=MUSIC_TRACKS.find(item => item.id===id); if (!track) return null;
-            const installed=!!downloadedMusic[id], progress=musicDownloads[id], index=musicQueue.indexOf(id);
-            return <View key={id} style={{minHeight:88,flexDirection:'row',alignItems:'center',gap:8,paddingVertical:12,borderBottomWidth:StyleSheet.hairlineWidth,borderColor:colors.line}}>
-              <Pressable accessibilityRole={installed?'radio':'text'} accessibilityState={installed?{checked:currentMusic===id}:undefined} disabled={!installed} onPress={() => {setCurrentMusic(id); savePreference('music-current',id);}} style={{flex:1,gap:4,paddingVertical:4}}>
-                <Text style={{fontSize:16,lineHeight:22,fontWeight:currentMusic===id?'600':'400',color:colors.ink}}>{track.title}</Text>
-                <Text style={{fontSize:13,lineHeight:19,color:colors.muted}}>{track.artist} · {(track.bytes/1000000).toFixed(1)} MB{track.id===DEFAULT_MUSIC_ID ? (appLanguage==='hi'?' · शामिल':' · Included') : ''}{installed && currentMusic===id ? (appLanguage==='hi'?' · चयनित':' · Selected') : ''}</Text>
+            const installed=!!downloadedMusic[id], progress=musicDownloads[id];
+            return <MusicReorderRow key={id} id={id} colors={colors} draggable={installed && musicQueue.length>1} label={`${appLanguage==='hi'?'क्रम बदलें':'Reorder'} ${track.title}`} hint={appLanguage==='hi'?'क्रम बदलने के लिए खींचें। पहुँच क्रियाओं से ऊपर या नीचे ले जाएँ।':'Drag to change playback order. Use accessibility actions to move up or down.'} moveUpLabel={appLanguage==='hi'?'ऊपर ले जाएँ':'Move up'} moveDownLabel={appLanguage==='hi'?'नीचे ले जाएँ':'Move down'} onMeasure={(key,y,rowHeight) => {musicRowLayouts.current[key]={y,height:rowHeight};}} onDrop={dropMusic} onMove={reorderMusic} onDragChange={setMusicDragging}>
+              <Pressable accessibilityRole={installed?'radio':'text'} accessibilityState={installed?{checked:currentMusic===id}:undefined} disabled={!installed} onPress={() => {if (!musicDownloaded(track)) {setDownloadedMusic(current => ({...current,[id]:false})); Alert.alert(appLanguage==='hi'?'गीत उपलब्ध नहीं है':'Track unavailable',appLanguage==='hi'?'कृपया इसे फिर से डाउनलोड करें।':'Please download it again.'); return;} setMusicError(false); setCurrentMusic(id); savePreference('music-current',id);}} style={{flex:1,flexDirection:'row',alignItems:'center',gap:10,paddingVertical:4}}>
+                {installed && <SymbolView name={{ios:currentMusic===id?'checkmark.circle.fill':'circle',android:currentMusic===id?'check_circle':'radio_button_unchecked',web:currentMusic===id?'check_circle':'radio_button_unchecked'}} tintColor={currentMusic===id?colors.accent:colors.muted} size={20} accessible={false}/>}
+                <View style={{flex:1,gap:4}}><Text style={{fontSize:16,lineHeight:22,fontWeight:currentMusic===id?'600':'400',color:colors.ink}}>{track.title}</Text><Text style={{fontSize:13,lineHeight:19,color:colors.muted}}>{track.artist} · {(track.bytes/1000000).toFixed(1)} MB{track.id===DEFAULT_MUSIC_ID ? (appLanguage==='hi'?' · शामिल':' · Included') : ''}{installed && currentMusic===id ? (appLanguage==='hi'?' · चयनित':' · Selected') : ''}</Text></View>
               </Pressable>
-              {installed ? <><Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'ऊपर ले जाएँ':'Move up'} ${track.title}`} accessibilityState={{disabled:index===0}} disabled={index===0} onPress={() => reorderMusic(id,-1)} style={{width:44,height:44,alignItems:'center',justifyContent:'center',opacity:index===0?0.3:1}}><SymbolView name={{ios:'chevron.up',android:'keyboard_arrow_up',web:'keyboard_arrow_up'}} size={20} tintColor={colors.ink}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'नीचे ले जाएँ':'Move down'} ${track.title}`} accessibilityState={{disabled:index===musicQueue.length-1}} disabled={index===musicQueue.length-1} onPress={() => reorderMusic(id,1)} style={{width:44,height:44,alignItems:'center',justifyContent:'center',opacity:index===musicQueue.length-1?0.3:1}}><SymbolView name={{ios:'chevron.down',android:'keyboard_arrow_down',web:'keyboard_arrow_down'}} size={20} tintColor={colors.ink}/></Pressable>{id!==DEFAULT_MUSIC_ID && <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'हटाएँ':'Remove'} ${track.title}`} onPress={() => deleteMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent}}>{appLanguage==='hi'?'हटाएँ':'Remove'}</Text></Pressable>}</> : progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{Math.round(progress*100)}%</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>}
-            </View>;
+              {installed ? id!==DEFAULT_MUSIC_ID && <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'हटाएँ':'Remove'} ${track.title}`} onPress={() => deleteMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent}}>{appLanguage==='hi'?'हटाएँ':'Remove'}</Text></Pressable> : progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{Math.round(progress*100)}%</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>}
+            </MusicReorderRow>;
           })}
           <Text style={[styles.imageHelp,{paddingVertical:16}]}>{appLanguage==='hi'?'गीत Creative Commons Attribution 4.0 के अंतर्गत हैं। विवरण क्रेडिट में देखें।':'Tracks are licensed under Creative Commons Attribution 4.0. See Credits for sources.'}</Text>
         </ScrollView> : settingsPage === 'chapter-select' ? <View style={{flex:1,paddingHorizontal:24}}>

@@ -30,6 +30,11 @@ export async function downloadMusic(track:MusicTrack,onProgress:(value:number)=>
     const file=await task.downloadAsync();
     if (!file || file.size!==track.bytes || await file.digest('SHA-256')!==track.sha256) throw new Error('The downloaded music could not be verified. Please try again.');
     if (target.exists) target.delete();
-    file.move(target);
-  } finally {if (staging.exists) staging.delete(); pending.delete(track.id);}
+    await file.move(target);
+  } finally {
+    // The downloaded File may update its URI during move; cleanup must target the original path.
+    try {const partial=new File(directory,`${track.filename}.partial`); if (partial.exists) partial.delete();}
+    catch (error) {console.warn('Could not remove temporary music download:',error);}
+    pending.delete(track.id);
+  }
 }

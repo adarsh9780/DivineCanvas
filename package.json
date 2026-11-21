@@ -49,7 +49,7 @@
     "lint": "expo lint",
     "test:progress": "node scripts/check-reading-progress.cjs",
     "test:lookup": "node scripts/check-lookup-gesture.cjs",
-    "test:music": "node scripts/check-music-queue.cjs",
+    "test:music": "node scripts/check-music-queue.cjs && node scripts/check-music-download.cjs",
     "test:books": "node scripts/check-itihasa.cjs",
     "postinstall": "patch-package",
     "test:book-db": "python3 scripts/check-itihasa-db.py"
