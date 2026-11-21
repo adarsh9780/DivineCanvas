@@ -65,12 +65,14 @@ const settingsDirection = (from: string, to: string): 'forward' | 'back' =>
 const EMPTY_CHAPTER_POSITIONS: Record<number, string> = {};
 type NavigationItem = {key: string; title: string; detail: string; idx: number; progress?: {percent: number; label: string}};
 
-function useEdgeBack(enabled:boolean, onBack:() => void) {
+function useEdgeBack(enabled:boolean, onBack:() => void, claimEdgeOnStart=false) {
   return useMemo(() => PanResponder.create({
+    // Settings contains native scroll views that can claim movement before a JS swipe is recognized.
+    onStartShouldSetPanResponderCapture:event => Platform.OS==='ios' && enabled && claimEdgeOnStart && event.nativeEvent.touches.length===1 && event.nativeEvent.pageX<=24,
     onMoveShouldSetPanResponderCapture:(event,gesture) => Platform.OS==='ios' && enabled && event.nativeEvent.touches.length===1 && event.nativeEvent.pageX-gesture.dx<=32 && gesture.dx>12 && gesture.dx>Math.abs(gesture.dy)*1.5,
     onPanResponderTerminationRequest:() => true,
     onPanResponderRelease:(_event,gesture) => {if (enabled && (gesture.dx>=70 || (gesture.dx>=30 && gesture.vx>0.65)) && gesture.dx>Math.abs(gesture.dy)*1.5) onBack();},
-  }),[enabled,onBack]);
+  }),[enabled,onBack,claimEdgeOnStart]);
 }
 
 function AutoScrollCountdown({seconds, active, finished, colors}: {seconds: number; active: boolean; finished: boolean; colors: Palette}) {
@@ -846,7 +848,7 @@ export default function App() {
   const autoScrollRunning = !walkthroughVisible && ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
   const handleReaderEdgeBack = useCallback(() => {setTouchingReader(false); if (screen==='read') {setImmersive(false); setScreen('books');} else backToReader();},[screen,backToReader]);
   const readerBackGesture = useEdgeBack(settingsPage===null && !readerMenuOpen && !sectionMenuOpen && !walkthroughVisible && bookInfo===null && editing===null && dictionaryWord===null && sharingId===null && !pinching && screen!=='books',handleReaderEdgeBack);
-  const settingsBackGesture = useEdgeBack(settingsPage!==null && !showIconLicense,closeSettingsPage);
+  const settingsBackGesture = useEdgeBack(settingsPage!==null && !showIconLicense,closeSettingsPage,true);
   if (!ready) return <View style={styles.loading}><ActivityIndicator color={colors.accent}/></View>;
   return <SafeAreaView {...readerBackGesture.panHandlers} style={styles.root} edges={screen === 'read' ? (immersive ? ['left','right'] : ['top','left','right']) : undefined}
     onTouchStartCapture={startPinch}
