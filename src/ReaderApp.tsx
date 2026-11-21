@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, Keyboard, KeyboardAvoidingView, LayoutAnimation, Linking, Modal, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, Keyboard, KeyboardAvoidingView, LayoutAnimation, Linking, Modal, NativeModules, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as SQLite from 'expo-sqlite';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
@@ -64,6 +64,14 @@ const settingsDirection = (from: string, to: string): 'forward' | 'back' =>
   to === 'menu' || (from === 'chapter-select' && to === 'chapter-images') || (from === 'chapter-images' && to === 'reading') ? 'back' : 'forward';
 const EMPTY_CHAPTER_POSITIONS: Record<number, string> = {};
 type NavigationItem = {key: string; title: string; detail: string; idx: number; progress?: {percent: number; label: string}};
+
+function useEdgeBack(enabled:boolean, onBack:() => void) {
+  return useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponderCapture:(event,gesture) => Platform.OS==='ios' && enabled && event.nativeEvent.touches.length===1 && event.nativeEvent.pageX-gesture.dx<=32 && gesture.dx>12 && gesture.dx>Math.abs(gesture.dy)*1.5,
+    onPanResponderTerminationRequest:() => true,
+    onPanResponderRelease:(_event,gesture) => {if (enabled && (gesture.dx>=70 || (gesture.dx>=30 && gesture.vx>0.65)) && gesture.dx>Math.abs(gesture.dy)*1.5) onBack();},
+  }),[enabled,onBack]);
+}
 
 function AutoScrollCountdown({seconds, active, finished, colors}: {seconds: number; active: boolean; finished: boolean; colors: Palette}) {
   const {t} = useAppLanguage();
@@ -150,6 +158,10 @@ export default function App() {
   function finishPinch(event:GestureResponderEvent) {if (event.nativeEvent.touches.length<2) {pinch.current=null; setPinching(false);}}
   const [sectionMenuOpen, setSectionMenuOpen] = useState(false);
   const [readerMenuOpen, setReaderMenuOpen] = useState(false);
+  const [settingsFromReaderMenu, setSettingsFromReaderMenu] = useState(false);
+  const [savedFromReaderMenu, setSavedFromReaderMenu] = useState(false);
+  const settingsScrollPositions = useRef<Record<string,number>>({});
+  function settingsScrollProps(page:string) {return {contentOffset:{x:0,y:settingsScrollPositions.current[page] ?? 0},scrollEventThrottle:16,onScroll:(event:NativeSyntheticEvent<NativeScrollEvent>) => {settingsScrollPositions.current[page]=Math.max(0,event.nativeEvent.contentOffset.y);}};}
   const [activeBookId, setActiveBookId] = useState(GITA_BOOK_ID);
   const activeBook = books.find(book => book.id === activeBookId) ?? books[0];
   const {passages, chapters} = activeBook;
@@ -417,7 +429,7 @@ export default function App() {
   }
   function openChapterImages(origin:'reading'|null) {
     setPickerBookId(activeBook.id); setPickerChapter(passages[index]?.chapter ?? 1);
-    setChapterSearch(''); setShuffleMessage(''); setImagePickerReturn(origin); setReaderMenuOpen(false); setSettingsPage('chapter-images');
+    setChapterSearch(''); setShuffleMessage(''); setImagePickerReturn(origin); if (origin===null) setSettingsFromReaderMenu(true); setReaderMenuOpen(false); setSettingsPage('chapter-images');
   }
   function updateChapterImage(id:string|null) {
     const key=chapterImageKey(pickerBookId,pickerChapter);
@@ -447,11 +459,17 @@ export default function App() {
     setBookImageSeeds(nextSeeds); setChapterOverrides(nextOverrides);
     showShuffleMessage(activeImages.length<2 ? (appLanguage==='hi'?'केवल एक चित्र चुना गया है।':'Only one image is selected.') : background!=='images' ? (appLanguage==='hi'?'चित्र बदल गए। देखने के लिए पृष्ठभूमि चित्र चालू करें।':'Images shuffled. Turn on image backgrounds to see them.') : (appLanguage==='hi'?`${t(book.title)} के सभी चित्र बदल दिए गए।`:`${t(book.title)} chapter images shuffled.`));
   }
-  function closeSettingsPage() {
+  const closeSettingsPage = useCallback(() => {
     if (settingsPage==='chapter-select') {setSettingsPage('chapter-images'); return;}
-    if (settingsPage==='chapter-images') {setSettingsPage(imagePickerReturn); return;}
-    setSettingsPage(settingsPage==='menu' ? null : 'menu');
-  }
+    if (settingsPage==='chapter-images') {
+      setSettingsPage(imagePickerReturn);
+      if (imagePickerReturn===null && settingsFromReaderMenu) setReaderMenuOpen(true);
+      return;
+    }
+    if (settingsPage==='menu') {setSettingsPage(null); if (settingsFromReaderMenu) setReaderMenuOpen(true); return;}
+    setSettingsPage('menu');
+  },[settingsPage,imagePickerReturn,settingsFromReaderMenu]);
+  const backToReader = useCallback(() => {setScreen('read'); if (screen==='saved' && savedFromReaderMenu) {setReaderMenuOpen(true); setSavedFromReaderMenu(false);}},[screen,savedFromReaderMenu]);
   function toggleImage(id: string) {
     const next = selectedImages.includes(id) ? selectedImages.filter(value => value !== id) : [...selectedImages, id];
     if (!next.length) { Alert.alert(t("Choose an image"), t("Keep at least one image selected.")); return; }
@@ -826,8 +844,11 @@ export default function App() {
   const pickerBackground = chapterBackground(bookImages,activeImages,pickerBookId,pickerChapter,bookImageSeeds[pickerBookId] ?? imageSeed,chapterOverrides);
   const autoScrollFinished = index >= passages.length - 1 && !continuationPending;
   const autoScrollRunning = !walkthroughVisible && ready && autoScrollEnabled && !readAloud && appActive && screen === 'read' && settingsPage === null && !readerMenuOpen && editing === null && dictionaryWord === null && sharingId === null && selectedWord === null && !narrating && !touchingReader && !autoScrollFinished;
+  const handleReaderEdgeBack = useCallback(() => {setTouchingReader(false); if (screen==='read') {setImmersive(false); setScreen('books');} else backToReader();},[screen,backToReader]);
+  const readerBackGesture = useEdgeBack(settingsPage===null && !readerMenuOpen && !sectionMenuOpen && !walkthroughVisible && bookInfo===null && editing===null && dictionaryWord===null && sharingId===null && !pinching && screen!=='books',handleReaderEdgeBack);
+  const settingsBackGesture = useEdgeBack(settingsPage!==null && !showIconLicense,closeSettingsPage);
   if (!ready) return <View style={styles.loading}><ActivityIndicator color={colors.accent}/></View>;
-  return <SafeAreaView style={styles.root} edges={screen === 'read' ? (immersive ? ['left','right'] : ['top','left','right']) : undefined}
+  return <SafeAreaView {...readerBackGesture.panHandlers} style={styles.root} edges={screen === 'read' ? (immersive ? ['left','right'] : ['top','left','right']) : undefined}
     onTouchStartCapture={startPinch}
     onTouchMoveCapture={movePinch}
     onTouchEndCapture={finishPinch}
@@ -867,9 +888,9 @@ export default function App() {
       </View>
       {readAloud ? <Pressable accessibilityRole="button" accessibilityLabel={t("Stop read aloud")} onPress={stopReadAloud} style={styles.playbackStatus}><Text style={styles.settingsMenuDescription}>{t("Reading aloud · tap to stop")}</Text></Pressable> : autoScrollEnabled && <View style={styles.playbackStatus}><AutoScrollCountdown key={`${index}-${interactionCount}-${autoScrollSeconds}-${autoScrollRunning}`} seconds={autoScrollSeconds} active={autoScrollRunning} finished={autoScrollFinished} colors={colors}/></View>}
     </>}</> : <View style={styles.settingsNavigationHeader}>
-      {screen !== 'books' && <Pressable accessibilityRole="button" accessibilityLabel={t("Back to reader")} onPress={() => setScreen('read')} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>}
+      {screen !== 'books' && <Pressable accessibilityRole="button" accessibilityLabel={t("Back to reader")} onPress={backToReader} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>}
       {screen === 'books' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Choose section, current section Books")} accessibilityState={{expanded:sectionMenuOpen}} onPress={() => setSectionMenuOpen(true)} style={{flex:1,flexDirection:'row',alignItems:'center',gap:8,minHeight:48}}><Text style={[styles.settingsNavigationTitle,{flex:0}]}>{t("Books")}</Text><Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><Path d="m6 9 6 6 6-6"/></Svg></Pressable> : <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{screen === 'chapters' ? t("Chapters") : t("Saved passages")}</Text>}
-      <Pressable accessibilityRole="button" accessibilityLabel={t("Open settings")} onPress={() => setSettingsPage('menu')} style={styles.profileButton}><Svg width={23} height={23} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><Circle cx={12} cy={12} r={3}/></Svg></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={t("Open settings")} onPress={() => {setSettingsFromReaderMenu(false); setSettingsPage('menu');}} style={styles.profileButton}><Svg width={23} height={23} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><Circle cx={12} cy={12} r={3}/></Svg></Pressable>
     </View>}
     <View ref={readerView} collapsable={false} style={styles.main} onLayout={e => setReaderHeight(e.nativeEvent.layout.height)}
       onTouchStart={event => { readerTap.current = event.nativeEvent.touches.length===1 && readAloudRef.current && screen === 'read' && settingsPage === null ? {x:event.nativeEvent.pageX, y:event.nativeEvent.pageY, time:Date.now()} : null; }}
@@ -960,20 +981,20 @@ export default function App() {
       <Pressable accessibilityRole="button" accessibilityLabel={t("Close book menu")} onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
       <View style={styles.sheet}>
         <Text accessibilityRole="header" style={styles.readerMenuTitle}>{t(activeBook.title)}</Text>
-        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Saved verses and notes")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSavedFromReaderMenu(true); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Saved verses and notes")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
         <Pressable accessibilityRole="button" onPress={() => openChapterImages(null)} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{appLanguage==='hi'?'अध्याय के चित्र':'Chapter images'}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
         <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); shuffleChapterImages(activeBook,passages[index]?.chapter);}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{appLanguage==='hi'?'चित्रों को फिर से बदलें':'Shuffle images'}</Text><Text style={styles.settingsChevron}>↻</Text></Pressable>
-        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSettingsPage('menu');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Settings")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSettingsFromReaderMenu(true); setSettingsPage('menu');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Settings")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
       </View>
     </View>}
     <Modal visible={settingsPage !== null} animationType="slide" onRequestClose={closeSettingsPage}>
-      <SafeAreaProvider><SafeAreaView style={styles.settingsScreen}>
+      <SafeAreaProvider><SafeAreaView {...settingsBackGesture.panHandlers} style={styles.settingsScreen}>
         <TransitionDeck sceneKey={settingsPage ?? 'menu'} direction={settingsDirection}>
         <View style={styles.settingsNavigationHeader}>
           <Pressable accessibilityRole="button" accessibilityLabel={settingsPage === 'menu' ? t("Back to reader") : t("Back to settings")} onPress={closeSettingsPage} style={styles.settingsBackButton}><Text style={styles.backIcon}>‹</Text></Pressable>
           <Text accessibilityRole="header" style={styles.settingsNavigationTitle}>{settingsPage === 'chapter-images' ? (appLanguage==='hi'?'अध्याय के चित्र':'Chapter images') : settingsPage === 'chapter-select' ? (appLanguage==='hi'?'अध्याय चुनें':'Choose chapter') : settingsPage === 'walkthroughs' ? (appLanguage==='hi'?'परिचय':'Walkthroughs') : settingsPage === 'language' ? t("App language") : settingsPage === 'credits' ? t("Credits") : settingsPage === 'privacy' ? (appLanguage === 'hi' ? 'गोपनीयता' : 'Privacy') : settingsPage === 'reading' ? t("Reading customisation") : settingsPage === 'appearance' ? t("App appearance") : settingsPage === 'playback' ? t("Reading playback") : settingsPage === 'music' ? t("Music") : settingsPage === 'downloads' ? t("Downloaded resources") : settingsPage === 'dictionary' ? t("Dictionary") : t("Settings")}</Text>
         </View>
-        {settingsPage === 'menu' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        {settingsPage === 'menu' ? <ScrollView {...settingsScrollProps('menu')} contentContainerStyle={styles.settingsList}>
           <Pressable accessibilityRole="button" accessibilityLabel={t("App language")} onPress={() => setSettingsPage('language')} style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("App language")}</Text><Text style={styles.settingsMenuDescription}>{t("Choose the language used in menus and settings.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
@@ -1002,14 +1023,14 @@ export default function App() {
           <Pressable accessibilityRole="button" accessibilityLabel={t("Credits")} onPress={() => setSettingsPage('credits')} style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Credits")}</Text><Text style={styles.settingsMenuDescription}>{t("Books, music, voice and other sources.")}</Text></View><Text style={styles.settingsChevron}>›</Text>
           </Pressable>
-        </ScrollView> : settingsPage === 'walkthroughs' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'walkthroughs' ? <ScrollView {...settingsScrollProps('walkthroughs')} contentContainerStyle={styles.settingsList}>
           <Text style={styles.imageHelp}>{appLanguage==='hi'?'किसी परिचय को रीसेट करें ताकि वह अगली बार संबंधित अनुभाग खोलने पर दिखाई दे।':'Reset a guide to see it the next time you open its section.'}</Text>
           <Pressable accessibilityRole="button" accessibilityState={{disabled:walkthroughSaving}} disabled={walkthroughSaving} onPress={() => void resetWalkthrough('reader')} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'पढ़ने का परिचय रीसेट करें':'Reset reading walkthrough'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'पूरी स्क्रीन पर पढ़ने के लिए पिंच करना सीखें।':'Learn the full-screen reading gestures.'}</Text></View><Text style={styles.settingsChevron}>↻</Text></Pressable>
           <Pressable accessibilityRole="button" accessibilityState={{disabled:walkthroughSaving}} disabled={walkthroughSaving} onPress={() => void resetWalkthrough('prashnavali')} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'प्रश्नावली का परिचय रीसेट करें':'Reset Prashnavali walkthrough'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'प्रश्नावली का उपयोग करना सीखें।':'Learn how to use the Prashnavali board.'}</Text></View><Text style={styles.settingsChevron}>↻</Text></Pressable>
-        </ScrollView> : settingsPage === 'language' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'language' ? <ScrollView {...settingsScrollProps('language')} contentContainerStyle={styles.settingsList}>
           <Text style={styles.imageHelp}>{t("Choose the language used in menus and settings.")} {appLanguage === 'hi' ? 'पुस्तक के पाठ की भाषा अलग से चुनी जाती है।' : t("The reading language is chosen separately.")}</Text>
           {([['en',t("English")],['hi','हिंदी']] as const).map(([value,label]) => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={label} accessibilityState={{checked:appLanguage===value}} onPress={() => void setAppLanguage(value)} style={styles.choiceRow}><Text style={styles.settingsMenuTitle}>{label}</Text>{appLanguage===value && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>)}
-        </ScrollView> : settingsPage === 'privacy' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'privacy' ? <ScrollView {...settingsScrollProps('privacy')} contentContainerStyle={styles.settingsList}>
           <Text style={styles.imageHelp}>{appLanguage === 'hi' ? 'गोपनीयता नीति का प्रारूप · 18 नवंबर 2026' : 'Privacy policy draft · 18 November 2026'}</Text>
           {[
             ["Your device", "आपका डिवाइस", "Reading progress, saved passages, notes, preferences and downloaded content are stored on your device. Photos you select for backgrounds are copied into the app. Your device or backup provider may include app data in backups according to your settings.", "पढ़ने की स्थिति, सहेजे गए अंश, नोट्स, प्राथमिकताएँ और डाउनलोड की गई सामग्री आपके डिवाइस पर रहती है। पृष्ठभूमि के लिए चुने गए चित्रों की प्रतियाँ ऐप में रखी जाती हैं। आपकी सेटिंग के अनुसार डिवाइस या बैकअप सेवा ऐप डेटा का बैकअप ले सकती है।"],
@@ -1020,7 +1041,7 @@ export default function App() {
             ["Deleting data", "डेटा हटाना", "You can remove downloaded books, the dictionary and the voice model in the app. Removing a book keeps its notes and progress. Uninstalling normally removes local app data; device or cloud backups may remain and can be managed with your backup provider. Third-party services control their own logs.", "आप ऐप में डाउनलोड की गई पुस्तकें, शब्दकोश और वॉइस मॉडल हटा सकते हैं। पुस्तक हटाने पर उसके नोट्स और पढ़ने की स्थिति बनी रहती है। ऐप हटाने पर आम तौर पर स्थानीय डेटा हट जाता है; डिवाइस या क्लाउड बैकअप रह सकते हैं, जिन्हें आप अपनी बैकअप सेवा में प्रबंधित कर सकते हैं। अन्य सेवाएँ अपने लॉग स्वयं नियंत्रित करती हैं।"],
             ["Questions", "सवाल", "A privacy contact will be added before release. We will update this policy if our practices change.", "रिलीज़ से पहले गोपनीयता संपर्क जोड़ा जाएगा। हमारी प्रक्रिया बदलने पर हम यह नीति अपडेट करेंगे।"],
           ].map(([enTitle, hiTitle, enText, hiText]) => <View key={enTitle} style={styles.settingsCredits}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage === 'hi' ? hiTitle : enTitle}</Text><Text style={styles.settingsCreditText}>{appLanguage === 'hi' ? hiText : enText}</Text></View>)}
-        </ScrollView> : settingsPage === 'credits' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'credits' ? <ScrollView {...settingsScrollProps('credits')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsCredits}>
             <Text style={styles.settingsMenuTitle}>{t("Books")}</Text>
             <Text style={styles.settingsCreditText}>{t("Bhagavad Gita Hindi and English translations by Hansi Gita Bhawan Trust.")}</Text>
@@ -1052,13 +1073,13 @@ export default function App() {
             <Text accessibilityRole="button" accessibilityState={{expanded:showIconLicense}} onPress={() => setShowIconLicense(value => !value)} style={styles.settingsCreditLink}>{showIconLicense ? t("Hide icon license") : t("View icon license")}</Text>
             {showIconLicense && <Text style={styles.settingsCreditText}>{lucideNotice}</Text>}
           </View>
-        </ScrollView> : settingsPage === 'dictionary' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'dictionary' ? <ScrollView {...settingsScrollProps('dictionary')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
             {dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={dictionaryInstalled ? t("Remove English dictionary") : t("Download English dictionary")} onPress={() => {if (dictionaryInstalled) deleteDictionary(); else void installDictionaryFromSettings();}}><Text style={styles.downloadCancel}>{dictionaryInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
           </View>
           <Text style={styles.imageHelp}>{t("Double-tap an English word while reading to look it up. Hindi and Sanskrit dictionaries are not available yet.")}</Text>
-        </ScrollView> : settingsPage === 'downloads'  ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'downloads'  ? <ScrollView {...settingsScrollProps('downloads')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Downloaded · about 11 MB") : t("Not downloaded · about 11 MB")}</Text></View>
             {voiceDownload !== null ? <Pressable accessibilityRole="button" onPress={cancelVoiceDownload}><Text style={styles.downloadCancel}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={styles.downloadCancel}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
           </View>
@@ -1066,7 +1087,7 @@ export default function App() {
             {dictionaryInstalled && dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Remove English dictionary")} onPress={deleteDictionary}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>}
           </View>
           <Text style={styles.imageHelp}>{t("The dictionary can be downloaded when you double-tap an English word. Removing a resource does not remove your saved verses or notes.")}</Text>
-        </ScrollView> : settingsPage === 'playback' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'playback' ? <ScrollView {...settingsScrollProps('playback')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Tap the reader to stop.")}</Text></View>
             <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
@@ -1085,7 +1106,7 @@ export default function App() {
             <Slider accessibilityLabel={t("Time per passage")} accessibilityValue={{min:5,max:60,now:autoScrollSeconds,text:`${autoScrollSeconds} ${t("seconds")}`}} minimumValue={5} maximumValue={60} step={1} value={autoScrollSeconds} onValueChange={setAutoScrollSeconds} onSlidingComplete={value => {setAutoScrollSeconds(value); savePreference('auto-scroll-seconds', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
             <Text style={styles.settingsMenuDescription}>{t("Timed scrolling pauses while you interact. Read aloud advances after the voice finishes instead.")}</Text>
           </View>
-        </ScrollView> : settingsPage === 'music' ? <ScrollView contentContainerStyle={styles.settingsList}>
+        </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
             <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
@@ -1098,7 +1119,7 @@ export default function App() {
         </ScrollView> : settingsPage === 'chapter-select' ? <View style={{flex:1,paddingHorizontal:24}}>
           <TextInput accessibilityLabel={appLanguage==='hi'?'अध्याय खोजें':'Search chapters'} value={chapterSearch} onChangeText={setChapterSearch} placeholder={appLanguage==='hi'?'अध्याय संख्या या नाम खोजें':'Search chapter number or title'} placeholderTextColor={colors.muted} style={{color:colors.ink,borderBottomWidth:1,borderColor:colors.line,paddingVertical:14,fontSize:16}} />
           <FlatList keyboardShouldPersistTaps="handled" data={pickerBook.chapters.filter(chapter => `${chapter.number} ${chapter.title} ${chapter.detail ?? ''}`.toLowerCase().includes(chapterSearch.trim().toLowerCase()))} keyExtractor={chapter => String(chapter.number)} renderItem={({item}) => <Pressable accessibilityRole="button" accessibilityState={{selected:pickerChapter===item.number}} onPress={() => {setPickerChapter(item.number); setSettingsPage('chapter-images');}} style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'अध्याय':'Chapter'} {item.number}</Text><Text style={styles.settingsMenuDescription}>{localChapter(item.title)}</Text></View>{pickerChapter===item.number && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>} />
-        </View> : settingsPage === 'chapter-images' ? <ScrollView contentContainerStyle={styles.settingsContent}>
+        </View> : settingsPage === 'chapter-images' ? <ScrollView {...settingsScrollProps('chapter-images')} contentContainerStyle={styles.settingsContent}>
           <View><Text style={styles.preferenceLabel}>{appLanguage==='hi'?'पुस्तक':'Book'}</Text><Text style={[styles.settingsMenuTitle,{marginTop:8}]}>{t(pickerBook.title)}</Text><Text style={styles.imageHelp}>{appLanguage==='hi'?'हर पुस्तक और अध्याय का चुनाव अलग से सहेजा जाता है।':'Choices are saved separately for each book and chapter.'}</Text>
             {imagePickerReturn==='reading' && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{gap:8,paddingVertical:12}}>{books.map(book => <Pressable key={book.id} accessibilityRole="radio" accessibilityState={{checked:pickerBookId===book.id}} onPress={() => {setPickerBookId(book.id);setPickerChapter(book.chapters[0]?.number ?? 1);setShuffleMessage('');}} style={[styles.language,pickerBookId===book.id && styles.selectedOption]}><Text style={[styles.languageText,pickerBookId===book.id && styles.selectedText]}>{t(book.title)}</Text></Pressable>)}</ScrollView>}
           </View>
@@ -1108,7 +1129,7 @@ export default function App() {
           <Pressable accessibilityRole="radio" accessibilityState={{checked:!chapterOverrides[chapterImageKey(pickerBookId,pickerChapter)]}} onPress={() => updateChapterImage(null)} style={styles.choiceRow}><Text style={styles.paletteName}>{appLanguage==='hi'?'अपने आप चुनें':'Automatic'}</Text>{!chapterOverrides[chapterImageKey(pickerBookId,pickerChapter)] && <Text style={styles.choiceCheck}>✓</Text>}</Pressable>
           <View style={styles.imageGrid}>{bookImages.map((image,i) => {const chosen=chapterOverrides[chapterImageKey(pickerBookId,pickerChapter)]===image.id; return <Pressable key={image.id} accessibilityRole="radio" accessibilityLabel={`${appLanguage==='hi'?'चित्र':'Image'} ${i+1}`} accessibilityState={{checked:chosen}} onPress={() => updateChapterImage(image.id)} style={[styles.imageOption,chosen && styles.imageOptionSelected]}><Image source={image.thumbnail} style={styles.imageThumbnail} resizeMethod="resize"/>{chosen && <View style={styles.imageCheck}><Text style={styles.imageCheckText}>✓</Text></View>}</Pressable>;})}</View>
           <View><Pressable accessibilityRole="button" onPress={() => shuffleChapterImages(pickerBook,pickerChapter)} style={({pressed}) => [styles.button,{alignSelf:'flex-start',borderWidth:1,borderColor:colors.line,backgroundColor:pressed ? colors.line : 'transparent'}]}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'इस पुस्तक के चित्र बदलें':'Shuffle this book’s images'}</Text></Pressable><Text style={styles.imageHelp}>{appLanguage==='hi'?'इस पुस्तक के सभी अध्यायों के चित्र फिर से चुने जाएँगे, जिनमें आपके चुने चित्र भी शामिल हैं।':'Reshuffles all chapters in this book, including your chosen images.'}</Text>{!!shuffleMessage && <Text accessibilityLiveRegion="polite" style={{color:colors.accent,fontSize:14,fontWeight:'600',marginTop:10}}>{shuffleMessage}</Text>}</View>
-        </ScrollView> : settingsPage === 'reading' ? <ScrollView contentContainerStyle={styles.settingsContent}>
+        </ScrollView> : settingsPage === 'reading' ? <ScrollView {...settingsScrollProps('reading')} contentContainerStyle={styles.settingsContent}>
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'डिफ़ॉल्ट रूप से पूरी स्क्रीन':'Full screen by default'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'पुस्तक खोलते समय नियंत्रण छिपाएँ। पढ़ते समय पिंच करके उन्हें फिर दिखा सकते हैं।':'Hide controls when you open a book. Pinch inward while reading to show them.'}</Text></View><Switch accessibilityLabel={appLanguage==='hi'?'डिफ़ॉल्ट रूप से पूरी स्क्रीन':'Full screen by default'} value={defaultImmersive} onValueChange={value => {setDefaultImmersive(value); savePreference('default-fullscreen',String(value));}} trackColor={{true:colors.accent}}/></View>
           <View style={styles.preferenceGroup}><View><Text style={styles.preferenceLabel}>{t("Text size")}</Text><Text style={styles.imageHelp}>{t("Choose a comfortable size for reading.")}</Text></View><View style={styles.sizeOptions}>
             {fontSizes.map((size,i) => <Pressable key={size} accessibilityRole="button" accessibilityLabel={`${[t("Small"),t("Default"),t("Large")][i]} ${appLanguage==='hi'?'अक्षर':'text'}`} accessibilityState={{selected:fontSize===size}} onPress={() => {setFontSize(size); savePreference('font-size',String(size));}} style={[styles.sizeOption,fontSize===size && styles.selectedOption]}><Text style={[styles.sizeSample,{fontSize:18+i*4},fontSize===size && styles.selectedText]}>Aa</Text><Text style={[styles.optionLabel,fontSize===size && styles.selectedText]}>{[t("Small"),t("Default"),t("Large")][i]}</Text></Pressable>)}
@@ -1139,7 +1160,7 @@ export default function App() {
             <View style={styles.imageGrid}>{bookImages.map((image, i) => <Pressable key={image.id} accessibilityRole="checkbox" accessibilityLabel={`${appLanguage === 'hi' ? 'पृष्ठभूमि चित्र' : 'Background image'} ${i + 1}`} accessibilityState={{checked:selectedImages.includes(image.id)}} aria-checked={selectedImages.includes(image.id)} onPress={() => toggleImage(image.id)} style={[styles.imageOption,selectedImages.includes(image.id) && styles.imageOptionSelected]}><Image source={image.thumbnail} style={styles.imageThumbnail} resizeMethod="resize"/>{selectedImages.includes(image.id) && <View style={styles.imageCheck}><Text style={styles.imageCheckText}>✓</Text></View>}</Pressable>)}</View>
             <Pressable accessibilityRole="button" accessibilityState={{busy:addingImages}} disabled={addingImages} onPress={() => void addImages()} style={styles.addImages}><Text style={styles.addImagesText}>{addingImages ? t("Adding images…") : t("+ Add your images")}</Text></Pressable>
           </View>}
-        </ScrollView> : <ScrollView contentContainerStyle={styles.settingsContent}>
+        </ScrollView> : <ScrollView {...settingsScrollProps('appearance')} contentContainerStyle={styles.settingsContent}>
           <View style={styles.preferenceGroup}>
             <View><Text style={styles.preferenceLabel}>{t("Color palette")}</Text><Text style={styles.imageHelp}>{t("Choose a coordinated set of colors for the app.")}</Text></View>
             <View>{backgrounds.map(value => <Pressable key={value} accessibilityRole="radio" accessibilityLabel={`${t(backgroundLabels[value])} ${appLanguage === 'hi' ? 'रंग योजना' : 'palette'}`} accessibilityState={{checked:colorTheme===value}} aria-checked={colorTheme===value} onPress={() => {setColorTheme(value); savePreference('color-theme',value); if (background !== 'images') {setBackground(value); savePreference('background',value);}}} style={styles.choiceRow}>
