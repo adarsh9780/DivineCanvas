@@ -293,6 +293,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const chapterPositions = positionsByBook[activeBook.id] ?? EMPTY_CHAPTER_POSITIONS;
   const positionWrites = useRef<Promise<void>>(Promise.resolve());
   const [editing, setEditing] = useState<string | null>(null);
+  const noteInputRef = useRef<React.ComponentRef<typeof TextInput>>(null);
   const [note, setNote] = useState('');
   const activeSelection = useRef<{passageId:string; language:'en'|'hi'|'sa'; start:number; end:number; anchorStart:number; anchorEnd:number} | null>(null);
   const previousWordTap = useRef<Tap | null>(null);
@@ -1238,12 +1239,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </Animated.View>
       </View>
     </Modal>
-    <Modal visible={editing !== null} transparent animationType="slide" onRequestClose={() => { Keyboard.dismiss(); setEditing(null); }}>
+    <Modal visible={editing !== null} transparent animationType="slide" onShow={() => noteInputRef.current?.focus()} onRequestClose={() => { Keyboard.dismiss(); setEditing(null); }}>
       <KeyboardAvoidingView style={styles.overlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <ScrollView style={{maxHeight: '90%'}} keyboardShouldPersistTaps="handled" contentContainerStyle={{flexGrow: 1, justifyContent: 'flex-end'}}>
           <View accessibilityViewIsModal style={styles.sheet}>
             <Text accessibilityRole="header" style={styles.title}>{t("Add a note")}</Text>
-            <TextInput accessibilityLabel={t("Your note")} multiline value={note} onChangeText={setNote} placeholder={t("Write something…")} placeholderTextColor={colors.muted} style={styles.input}/>
+            <TextInput ref={noteInputRef} accessibilityLabel={t("Your note")} multiline value={note} onChangeText={setNote} placeholder={t("Write something…")} placeholderTextColor={colors.muted} style={styles.input}/>
             <Pressable accessibilityRole="button" onPress={Keyboard.dismiss} style={[styles.button, {alignSelf: 'flex-end'}]}><Text style={{color: colors.ink}}>{t("Hide keyboard")}</Text></Pressable>
             <View style={styles.sheetActions}>
               <Pressable accessibilityRole="button" onPress={() => { Keyboard.dismiss(); setEditing(null); }} style={styles.button}><Text style={{color:colors.ink}}>{t("Close")}</Text></Pressable>
