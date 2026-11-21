@@ -11,6 +11,8 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { gitaImages } from './bookBackgrounds';
 import { MenuView } from '@expo/ui/community/menu';
 import { SymbolView } from 'expo-symbols';
+import { SafeAreaView as TabSafeAreaView } from 'react-native-screens/experimental';
+import { MIGRATE_NOTES_SQL } from './verseAnnotations';
 import { PRASHNAVALI_WALKTHROUGH_KEY, READER_WALKTHROUGH_KEY, readerWalkthroughSeen } from './readerWalkthrough';
 import { chapterBackground, chapterImageKey, parseChapterImageOverrides, parseBookImageSeeds, shuffledBookSeed, clearBookImageOverrides, type BookImageSeeds, type ChapterImageOverrides } from './chapterBackgrounds';
 import Svg, { Circle, Path } from 'react-native-svg';
@@ -240,6 +242,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     return () => { cancelled = true; musicPlayer.pause(); };
   }, [musicPlayer, ready, musicEnabled, appActive, isBooksActive, screen, musicStatus.isLoaded, musicFailed, musicAttempt]);
   const [saved, setSaved] = useState<Saved>({});
+  const [notes, setNotes] = useState<Record<string,string>>({});
+  const pendingLikes = useRef(new Set<string>());
   const [index, setIndex] = useState(0);
   const textDbs = useRef<Record<string,Promise<SQLite.SQLiteDatabase>>>({});
   const [installedBooks, setInstalledBooks] = useState<Record<string,boolean>>(() => Object.fromEntries(books.map(b => [b.id, bookDownloaded(b.id)])));
@@ -269,7 +273,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   useEffect(() => {
     if (screen !== 'saved' || !installedBooks[activeBookId]) return;
     let cancelled = false;
-    const ids = Object.keys(saved).filter(id => id.startsWith(activeBookId + ':'));
+    const ids = [...new Set([...Object.keys(saved),...Object.keys(notes)])].filter(id => id.startsWith(activeBookId + ':'));
     (async () => {
       const database = await getTextDb(activeBookId);
       const found: Record<string,{en:string;sa:string;hi:string}> = {};
@@ -281,7 +285,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       if (!cancelled) setSavedText(found);
     })().catch(error => console.warn('Could not load saved passage text', error));
     return () => {cancelled = true;};
-  }, [screen, activeBookId, saved, installedBooks, getTextDb]);
+  }, [screen, activeBookId, saved, notes, installedBooks, getTextDb]);
 
   const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('hi');
   const [positionsByBook, setPositionsByBook] = useState<Record<string, Record<number, string>>>({});
@@ -329,8 +333,11 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         await database.runAsync("UPDATE settings SET value = 'sa' WHERE key = 'language' AND value = 'hi'");
         await database.runAsync("INSERT OR REPLACE INTO settings (key, value) VALUES ('gita-trust-migrated', '1')");
       }
+      await database.execAsync(MIGRATE_NOTES_SQL);
       const rows = await database.getAllAsync<{id: string; note: string}>('SELECT id, note FROM saves');
+      const noteRows = await database.getAllAsync<{id:string;note:string}>('SELECT id, note FROM verse_notes');
       setSaved(Object.fromEntries(rows.map(row => [row.id, row.note])));
+      setNotes(Object.fromEntries(noteRows.map(row => [row.id,row.note])));
       // Migrate existing Gita progress without overwriting newer book-scoped values.
       const scopedMigration = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'book-progress-migrated'");
       if (!scopedMigration) {
@@ -515,19 +522,33 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     } finally { setAddingImages(false); }
   }
   async function toggle(p: Passage) {
-    if (Object.hasOwn(saved, p.id)) {
-      await db.current?.runAsync('DELETE FROM saves WHERE id = ?', p.id);
-      setSaved(current => { const next = {...current}; delete next[p.id]; return next; });
-    } else {
-      await db.current?.runAsync('INSERT OR REPLACE INTO saves (id, note) VALUES (?, ?)', p.id, '');
-      setSaved(current => ({...current, [p.id]: ''}));
-      setNote(''); setEditing(p.id);
-    }
+    if (!db.current || pendingLikes.current.has(p.id)) return;
+    pendingLikes.current.add(p.id);
+    try {
+      if (Object.hasOwn(saved, p.id)) {
+        await db.current.runAsync('DELETE FROM saves WHERE id = ?', p.id);
+        setSaved(current => {const next={...current}; delete next[p.id]; return next;});
+      } else {
+        await db.current.runAsync('INSERT OR IGNORE INTO saves (id, note) VALUES (?, ?)', p.id, '');
+        setSaved(current => ({...current,[p.id]:''}));
+      }
+    } catch {Alert.alert(t("Could not save"),t("Please try again."));}
+    finally {pendingLikes.current.delete(p.id);}
   }
+  function openNote(id:string) {setNote(notes[id] ?? ''); setEditing(id);}
   async function saveNote() {
-    if (!editing) return;
-    await db.current?.runAsync('UPDATE saves SET note = ? WHERE id = ?', note, editing);
-    setSaved(current => ({ ...current, [editing]: note })); setEditing(null);
+    if (!editing || !db.current) return;
+    try {
+      const id=editing;
+      if (note.trim()) {
+        await db.current.runAsync('INSERT OR REPLACE INTO verse_notes (id,note) VALUES (?,?)',id,note);
+        setNotes(current => ({...current,[id]:note}));
+      } else {
+        await db.current.runAsync('DELETE FROM verse_notes WHERE id = ?',id);
+        setNotes(current => {const next={...current}; delete next[id]; return next;});
+      }
+      setEditing(null);
+    } catch {Alert.alert(t("Could not save"),t("Please try again."));}
   }
   const rememberPosition = useCallback((i: number) => {
     const book = books.find(candidate => candidate.id === activeBookId) ?? books[0];
@@ -1092,6 +1113,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         {Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable> : <MenuView
           title={t(activeBook.title)} style={styles.profileButton}
           actions={[
+            {id:'like',title:Object.hasOwn(saved,currentPassage.id) ? (appLanguage==='hi'?'पसंद हटाएँ':'Unlike this verse') : (appLanguage==='hi'?'पसंद करें':'Like this verse'),state:Object.hasOwn(saved,currentPassage.id)?'on':'off'},
+            {id:'note',title:notes[currentPassage.id] ? (appLanguage==='hi'?'नोट बदलें':'Edit note') : (appLanguage==='hi'?'नोट लिखें':'Write a note')},
             {id:'saved',title:t("Saved verses and notes")},
             {id:'images',title:appLanguage==='hi'?'अध्याय के चित्र':'Chapter images'},
             {id:'shuffle',title:appLanguage==='hi'?'चित्रों को फिर से बदलें':'Shuffle images'},
@@ -1099,7 +1122,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           onOpenMenu={() => setReaderMenuOpen(true)} onCloseMenu={() => setReaderMenuOpen(false)}
           onPressAction={event => {
             setReaderMenuOpen(false);
-            if (event.nativeEvent.event==='saved') {setSavedFromReaderMenu(false); setScreen('saved');}
+            if (event.nativeEvent.event==='like') void toggle(currentPassage);
+            else if (event.nativeEvent.event==='note') openNote(currentPassage.id);
+            else if (event.nativeEvent.event==='saved') {setSavedFromReaderMenu(false); setScreen('saved');}
             else if (event.nativeEvent.event==='images') openChapterImages(null);
             else if (event.nativeEvent.event==='shuffle') shuffleChapterImages(activeBook,passages[index]?.chapter);
           }}>
@@ -1141,8 +1166,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Pressable accessibilityRole="button" accessibilityLabel={t("Clear selection")} onPress={() => {activeSelection.current = null; setSelectedWord(null);}} style={styles.selectionButton}><Text style={styles.selectionButtonText}>{t("Done")}</Text></Pressable>
             <Text style={styles.selectionHint}>{t("Tap another word to extend")}</Text>
           </View>} />
-        {!immersive && <View><View style={styles.pageBottom}><View style={styles.referenceGroup}><Text accessibilityLabel={activeBook.id === GITA_BOOK_ID ? `${activeBook.title}, chapter ${item.chapter}, ${item.label}` : `${activeBook.title}, ${item.chapterTitle}, ${item.label}`} style={[styles.reference,useBookImages && styles.imageReference]}>{activeBook.id === GITA_BOOK_ID ? `${appLanguage === 'hi' ? 'गीता' : activeBook.shortTitle} ${item.chapter}.${item.label.replace(/^TEXTS?\s+/i, '')}` : `${localChapter(item.chapterTitle)} · ${appLanguage === 'hi' ? item.label.replace('PASSAGE','अंश') : item.label.toLowerCase()}`}</Text></View><View style={[styles.actions,sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={narrating ? t("Stop reading aloud") : t("Read passage aloud")} onPress={() => {if (readAloud || readAloudRef.current) stopReadAloud(); else if (narrating) stopNarration(); else if (!loading) void startNarration(item);}} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{narrating ? <Path d="M7 7h10v10H7z"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved, item.id) ? t("Remove saved passage") : t("Save passage")} onPress={() => void toggle(item)} style={styles.action}><Text style={styles.heart}>{Object.hasOwn(saved, item.id) ? '♥' : '♡'}</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel={t("Share passage image")} accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null || loading} onPress={() => void sharePassage(item)} style={styles.action}><Svg accessible={false} width={22} height={22} viewBox="0 0 24 24" fill="none"><Path d="M22 2 9.5 14.5M22 2l-7.5 20-5-7.5L2 9.5 22 2Z" stroke={colors.accent} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" /></Svg></Pressable>{Object.hasOwn(saved, item.id) && <Pressable accessibilityRole="button" accessibilityLabel={t("Edit note")} onPress={() => {setEditing(item.id); setNote(saved[item.id]);}} style={styles.action}><Text style={styles.noteIcon}>✎</Text></Pressable>}</View></View></View>}
-      </View>; }}/> : screen === 'books' ? <View style={styles.section}>
+        {!immersive && <TabSafeAreaView edges={{bottom:true}} style={{flex:0}}><View style={styles.pageBottom}><View style={styles.referenceGroup}><Text accessibilityLabel={activeBook.id === GITA_BOOK_ID ? `${activeBook.title}, chapter ${item.chapter}, ${item.label}` : `${activeBook.title}, ${item.chapterTitle}, ${item.label}`} style={[styles.reference,useBookImages && styles.imageReference]}>{activeBook.id === GITA_BOOK_ID ? `${appLanguage === 'hi' ? 'गीता' : activeBook.shortTitle} ${item.chapter}.${item.label.replace(/^TEXTS?\s+/i, '')}` : `${localChapter(item.chapterTitle)} · ${appLanguage === 'hi' ? item.label.replace('PASSAGE','अंश') : item.label.toLowerCase()}`}</Text></View><View style={[styles.actions,sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={narrating ? t("Stop reading aloud") : t("Read passage aloud")} onPress={() => {if (readAloud || readAloudRef.current) stopReadAloud(); else if (narrating) stopNarration(); else if (!loading) void startNarration(item);}} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{narrating ? <Path d="M7 7h10v10H7z"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved,item.id) ? (appLanguage==='hi'?'पसंद हटाएँ':'Unlike verse') : (appLanguage==='hi'?'पसंद करें':'Like verse')} accessibilityState={{selected:Object.hasOwn(saved,item.id)}} onPress={() => void toggle(item)} style={styles.action}><SymbolView name={{ios:Object.hasOwn(saved,item.id)?'heart.fill':'heart',android:Object.hasOwn(saved,item.id)?'favorite':'favorite_border',web:Object.hasOwn(saved,item.id)?'favorite':'favorite_border'}} tintColor={colors.accent} size={22}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={notes[item.id] ? (appLanguage==='hi'?'नोट बदलें':'Edit note') : (appLanguage==='hi'?'नोट लिखें':'Write a note')} onPress={() => openNote(item.id)} style={styles.action}><SymbolView name={{ios:notes[item.id]?'bubble.left.fill':'bubble.left',android:notes[item.id]?'chat_bubble':'chat_bubble_outline',web:notes[item.id]?'chat_bubble':'chat_bubble_outline'}} tintColor={colors.accent} size={22}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={t("Share passage image")} accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null || loading} onPress={() => void sharePassage(item)} style={styles.action}><SymbolView name={{ios:'paperplane',android:'send',web:'send'}} tintColor={colors.accent} size={22}/></Pressable></View></View></TabSafeAreaView>}
+      </View>; }}/>  : screen === 'books' ? <View style={styles.section}>
         <FlatList data={books} keyExtractor={book => book.id} renderItem={({item}) => {
           const last = lastByBook[item.id] ? item.passages.find(p => p.id === lastByBook[item.id]) : undefined;
           const installed = !!installedBooks[item.id];
@@ -1160,7 +1185,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             {!installed ? <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'डाउनलोड करें':'download'}`} accessibilityState={{busy:downloading}} onPress={() => {if (!downloading) void installBook(item);}} style={{width:48,height:48,alignItems:'center',justifyContent:'center'}}><Svg width={32} height={32} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"><Path d="M12 3v12m-5-5 5 5 5-5M5 19h14"/></Svg></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'खोलें':'open'}`} onPress={() => openBook(item)} style={{width:48,height:48,alignItems:'center',justifyContent:'center'}}><Text accessible={false} style={styles.arrow}>›</Text></Pressable>}
           </View>;
         }}/>
-      </View> : <View style={styles.section}><FlatList<NavigationItem> data={screen === 'chapters' ? chapterItems : passages.filter(p => Object.hasOwn(saved, p.id)).map(p => ({key: p.id, title: (savedText[p.id]?.[language] ?? p[language]) || p.label, detail: saved[p.id] || p.label, progress: undefined, idx: passages.indexOf(p)}))} keyExtractor={item => item.key} ListEmptyComponent={<Text style={styles.empty}>{t("Nothing saved yet. Tap the heart while reading to save a passage.")}</Text>} renderItem={({item}) => <Pressable accessibilityRole="button" onPress={() => jump(item.idx)} style={styles.row}><View style={{flex: 1}}><Text style={styles.rowLabel}>{item.detail}</Text><Text style={styles.rowTitle} numberOfLines={2}>{item.title}</Text>{item.progress && <View style={styles.chapterProgress}>
+      </View> : <View style={styles.section}><FlatList<NavigationItem> data={screen === 'chapters' ? chapterItems : passages.filter(p => Object.hasOwn(saved, p.id) || Object.hasOwn(notes,p.id)).map(p => ({key: p.id, title: (savedText[p.id]?.[language] ?? p[language]) || p.label, detail: notes[p.id] || p.label, progress: undefined, idx: passages.indexOf(p)}))} keyExtractor={item => item.key} ListEmptyComponent={<Text style={styles.empty}>{t("Nothing saved yet. Tap the heart while reading to save a passage.")}</Text>} renderItem={({item}) => <Pressable accessibilityRole="button" onPress={() => jump(item.idx)} style={styles.row}><View style={{flex: 1}}><Text style={styles.rowLabel}>{item.detail}</Text><Text style={styles.rowTitle} numberOfLines={2}>{item.title}</Text>{item.progress && <View style={styles.chapterProgress}>
           <View style={styles.progressLabels}><Text style={styles.progressText}>{item.progress.label}</Text><Text style={styles.progressText}>{item.progress.percent}%</Text></View>
           <View accessibilityRole="progressbar" accessibilityLabel={`${appLanguage==='hi'?'पढ़ने की स्थिति':'Reading position'}: ${item.progress.label}`} accessibilityValue={{min:0,max:100,now:item.progress.percent}} style={styles.progressTrack}><View style={[styles.progressFill,{width:`${item.progress.percent}%`}]}/></View>
         </View>}</View><Text style={styles.arrow}>↗</Text></Pressable>}/></View>}
@@ -1191,6 +1216,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       <Pressable accessibilityRole="button" accessibilityLabel={t("Close book menu")} onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
       <View style={styles.sheet}>
         <Text accessibilityRole="header" style={styles.readerMenuTitle}>{t(activeBook.title)}</Text>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); void toggle(currentPassage);}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{Object.hasOwn(saved,currentPassage.id) ? (appLanguage==='hi'?'पसंद हटाएँ':'Unlike this verse') : (appLanguage==='hi'?'पसंद करें':'Like this verse')}</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); openNote(currentPassage.id);}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{notes[currentPassage.id] ? (appLanguage==='hi'?'नोट बदलें':'Edit note') : (appLanguage==='hi'?'नोट लिखें':'Write a note')}</Text></Pressable>
         <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); setSavedFromReaderMenu(true); setScreen('saved');}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{t("Saved verses and notes")}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
         <Pressable accessibilityRole="button" onPress={() => openChapterImages(null)} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{appLanguage==='hi'?'अध्याय के चित्र':'Chapter images'}</Text><Text style={styles.settingsChevron}>›</Text></Pressable>
         <Pressable accessibilityRole="button" onPress={() => {setReaderMenuOpen(false); shuffleChapterImages(activeBook,passages[index]?.chapter);}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{appLanguage==='hi'?'चित्रों को फिर से बदलें':'Shuffle images'}</Text><Text style={styles.settingsChevron}>↻</Text></Pressable>
