@@ -44,3 +44,8 @@ Docs: https://docs.expo.dev/eas/index.md
 
 - After completing and verifying requested changes, commit them in coherent groups with descriptive conventional commit messages and push the branch, unless the user says otherwise or the action is blocked.
 - Git commit messages are developer history, not store release notes. When preparing a store submission, separately describe meaningful user-facing changes and provide accurate review notes under the current Apple and Google requirements.
+
+## Native platform conventions
+
+- Prefer platform-native controls, navigation, gestures, menus, and system behavior where they meet the feature's needs on iOS, iPadOS, and Android. Use supported Expo/React Native platform APIs or platform-native components instead of recreating system UI by default.
+- Proactively mention an applicable native alternative and its tradeoffs when discussing or implementing a custom interface, even if the user has not explicitly asked. Preserve accessibility, platform conventions, existing behavior, and cross-platform support; explain any necessary exception.
