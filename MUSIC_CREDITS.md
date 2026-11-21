@@ -5,5 +5,4 @@ The bundled and optional music files are licensed under [Creative Commons Attrib
 - “Krishna Flute Music” by Alex Morgan — [source](https://freemusicarchive.org/music/alex-morgan/world-devotional-music/krishna-flute-music/) (bundled).
 - “Morning Stillness” by Ketsa — [source](https://freemusicarchive.org/music/Ketsa/modern-meditations/morning-stillness/).
 - “Meditation” by Ketsa — [source](https://freemusicarchive.org/music/Ketsa/modern-meditations/meditation-5/).
-- “Patterns” by Ketsa — [source](https://freemusicarchive.org/music/Ketsa/modern-meditations/patterns-1/).
 - “Meditative Zen Yoga Spa Chill Out Ambient” by Splashkabona — [source](https://freemusicarchive.org/music/splashkabona/single/meditative-zen-yoga-spa-chill-out-ambient/).

@@ -34,6 +34,13 @@ export function musicDropTarget(available:readonly string[], layouts:Record<stri
   }
   return target;
 }
+/** Toggle shuffle inclusion while keeping at least one available track. */
+export function toggleShuffleExclusion(excluded:readonly string[], id:string, available:readonly string[]):string[] | null {
+  if (!available.includes(id)) return [...excluded];
+  if (excluded.includes(id)) return excluded.filter(item => item!==id);
+  if (available.filter(item => !excluded.includes(item)).length<=1) return null;
+  return [...excluded,id];
+}
 /** Sequential mode loops in saved order; shuffle never repeats a track consecutively. */
 export function nextMusic(available: readonly string[], current: string, shuffle: boolean, random = Math.random()): string | undefined {
   if (!available.length) return undefined;
@@ -44,4 +51,14 @@ export function nextMusic(available: readonly string[], current: string, shuffle
   }
   const index = available.indexOf(current);
   return available[(index + 1) % available.length];
+}
+
+/** Shuffle only selected tracks, preserving all other tracks in their existing slots. */
+export function shuffleSelectedMusic(order:readonly string[], selected:readonly string[], random= Math.random):string[] {
+  const shuffled=order.filter(id => selected.includes(id));
+  for (let i=shuffled.length-1;i>0;i--) {const j=Math.floor(random()*(i+1)); [shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]];}
+  const original=order.filter(id => selected.includes(id));
+  if (shuffled.length>1 && shuffled.every((id,index) => id===original[index])) shuffled.push(shuffled.shift()!);
+  let index=0;
+  return order.map(id => selected.includes(id) ? shuffled[index++] : id);
 }

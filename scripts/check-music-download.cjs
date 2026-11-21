@@ -36,6 +36,13 @@ new Function('require','exports',compiled)(id => {
 },api);
 (async () => {
   const track={id:'test',filename:'test.mp3',sha256:'ok',bytes:9,title:'Test',artist:'Test',source:'https://example.com'};
+  files.set('documents/reading-music-v1/patterns.mp3',{size:3,sha:'old'});
+  files.set('documents/reading-music-v1/patterns.mp3.partial',{size:2,sha:'old'});
+  files.set('documents/reading-music-v1/other.mp3',{size:4,sha:'keep'});
+  api.removeRetiredMusic();
+  assert.equal(files.has('documents/reading-music-v1/patterns.mp3'),false);
+  assert.equal(files.has('documents/reading-music-v1/patterns.mp3.partial'),false);
+  assert.equal(files.has('documents/reading-music-v1/other.mp3'),true);
   const progress=[]; await api.downloadMusic(track,n => progress.push(n));
   assert.equal(moveFinished,true,'download must wait for the move');
   assert.equal(api.musicDownloaded(track),true,'cleanup must not remove the completed file');
