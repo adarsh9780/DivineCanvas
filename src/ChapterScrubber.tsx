@@ -29,8 +29,8 @@ export class ChapterScrubber extends React.Component<Props> {
     const {current,count,bottom,light,active:engaged,label,onSelect}=this.props;
     const ticks=15;
     const active=7;
-    return <View {...this.pan.panHandlers} accessible accessibilityRole="adjustable" accessibilityLabel={label} accessibilityValue={{min:1,max:count,now:current+1,text:`${current+1} / ${count}`}} accessibilityActions={[{name:'increment'},{name:'decrement'}]} onAccessibilityAction={event => {if(event.nativeEvent.actionName==='increment') onSelect(Math.min(count-1,current+1)); else if(event.nativeEvent.actionName==='decrement') onSelect(Math.max(0,current-1));}} style={{position:'absolute',left:'50%',marginLeft:-84,bottom,width:CONTROL_WIDTH,height:44,flexDirection:'row',alignItems:'center',justifyContent:'space-between',backgroundColor:engaged ? (light?'#ffffff20':'#00000012') : 'transparent',borderRadius:22}}>
-      {Array.from({length:ticks},(_,i) => <View key={i} pointerEvents="none" style={{height:i===active?14:12,width:2,borderRadius:1,opacity:i===active ? 1 : 0.55,backgroundColor:light ? '#fff' : '#65686b'}}/>)}
+    return <View {...this.pan.panHandlers} accessible accessibilityRole="adjustable" accessibilityLabel={label} accessibilityValue={{min:1,max:count,now:current+1,text:`${current+1} / ${count}`}} accessibilityActions={[{name:'increment'},{name:'decrement'}]} onAccessibilityAction={event => {if(event.nativeEvent.actionName==='increment') onSelect(Math.min(count-1,current+1)); else if(event.nativeEvent.actionName==='decrement') onSelect(Math.max(0,current-1));}} style={{position:'absolute',left:'50%',marginLeft:-84,bottom,width:CONTROL_WIDTH,height:44,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}}>
+      {Array.from({length:ticks},(_,i) => <View key={i} pointerEvents="none" style={{height:i===active?14:12,width:2,borderRadius:1,opacity:i===active ? 1 : engaged ? 0.85 : 0.55,backgroundColor:light ? '#fff' : '#65686b'}}/>)}
     </View>;
   }
 }
