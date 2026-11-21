@@ -1105,8 +1105,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     ] as const;
     return <View style={{flex:1,flexDirection:'row',backgroundColor:colors.paper}}>
       <SafeAreaView edges={['left','bottom']} style={{width:Math.min(320,width*0.34),backgroundColor:colors.white,borderRightWidth:StyleSheet.hairlineWidth,borderRightColor:colors.line}}>
-        <Text accessibilityRole="header" style={{fontSize:22,fontWeight:'700',color:colors.ink,paddingHorizontal:20,paddingTop:20,paddingBottom:12}}>{t('Settings')}</Text>
-        <ScrollView contentContainerStyle={{paddingHorizontal:12,paddingBottom:24}}>
+        <ScrollView contentContainerStyle={{paddingHorizontal:12,paddingTop:8,paddingBottom:24}}>
           {items.map(item => <Pressable key={item.page} accessibilityRole="button" accessibilityState={{selected:selectedPage===item.page}} onPress={() => {
             if (selectedPage === item.page && currentPage === item.page) return;
             setSplitSettingsStack([item.page]);
