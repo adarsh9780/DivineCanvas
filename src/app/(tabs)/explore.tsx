@@ -12,7 +12,6 @@ export default function ExploreTab() {
   const colors=palettes[colorTheme];
   const router=useRouter();
   return <SafeAreaView style={[styles.root,{backgroundColor:colors.paper}]} edges={['top','left','right']}>
-    <View style={[styles.header,{borderColor:colors.line}]}><Text accessibilityRole="header" style={[styles.title,{color:colors.ink}]}>{appLanguage==='hi'?'अन्वेषण':'Explore'}</Text></View>
     <ScrollView contentContainerStyle={styles.content}>
       <Text style={[styles.intro,{color:colors.muted}]}>{appLanguage==='hi'?'चिंतन और खोज के लिए स्थान।':'A space for reflection and discovery.'}</Text>
       <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'प्रश्नावली खोलें':'Open Prashnavali'} onPress={() => router.push({pathname:'/prashnavali',params:{theme:colorTheme}})} style={[styles.row,{borderColor:colors.line}]}>
@@ -21,4 +20,4 @@ export default function ExploreTab() {
     </ScrollView>
   </SafeAreaView>;
 }
-const styles=StyleSheet.create({root:{flex:1},header:{minHeight:64,flexDirection:'row',alignItems:'center',paddingHorizontal:16,borderBottomWidth:1},title:{fontSize:20,fontWeight:'600'},content:{paddingHorizontal:24,paddingTop:24,paddingBottom:32},intro:{fontSize:15,lineHeight:22,marginBottom:16},row:{minHeight:88,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:18,borderBottomWidth:1},rowText:{flex:1,gap:6},rowTitle:{fontSize:17,fontWeight:'600'},description:{fontSize:14,lineHeight:20},chevron:{fontSize:28}});
+const styles=StyleSheet.create({root:{flex:1},content:{paddingHorizontal:24,paddingTop:24,paddingBottom:32},intro:{fontSize:15,lineHeight:22,marginBottom:16},row:{minHeight:88,flexDirection:'row',alignItems:'center',gap:16,paddingVertical:18,borderBottomWidth:1},rowText:{flex:1,gap:6},rowTitle:{fontSize:17,fontWeight:'600'},description:{fontSize:14,lineHeight:20},chevron:{fontSize:28}});
