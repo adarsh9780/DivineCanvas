@@ -63,3 +63,59 @@ Offline devotional section accessible from the Books section selector. The tradi
 ## Interface language and credits
 
 Settings → App language selects English or Hindi for the app interface. This preference is stored locally under `app-language`, independently from the selected reading language. Settings → Credits contains book, Prashnavali, voice, music, dictionary and icon sources and their relevant notices. Original text, English dictionary definitions and legal license texts retain their source languages.
+
+
+## Offline spiritual learning and practice — ideas for future work
+
+These are discussion ideas, not implemented or finalized. The longer-term goal is a broad, respectful Hindu spiritual companion that remains useful offline, with modular content and practices.
+
+### Sanskrit word and compound learning
+
+- Let readers tap annotated Sanskrit words or compounds to see their component forms, dictionary forms and literal meanings, and optionally how they relate to the existing translation. Start with a small, expert-reviewed Gita pilot and expand to other texts and languages as quality permits.
+- Bundle or download versioned annotations for offline use, indexed by stable book, passage and token identifiers. Preserve the original verse and cite the source. Check linguistic data, translation and dictionary licensing separately, including commercial redistribution and attribution.
+- Sanskrit sandhi, inflection and compounds can have multiple analyses; automatic splitting is not always reliable. Show uncertainty or alternative analyses when appropriate, and leave unannotated words without an invented explanation. Investigate offline dictionaries and segmentation tools as editorial aids, with review by Sanskrit experts.
+
+#### Research: downloadable Sanskrit analysis pack
+
+- Sanskrit Heritage Reader combines finite-state sandhi segmentation and morphological analysis with lexicons; its English interface uses Monier-Williams, while the original Heritage dictionary is Sanskrit–French. Its documented installation targets a workstation/server, so an iOS/Android integration would require an evaluated native port or another approach, not just a downloaded website. See https://sanskrit.uohyd.ac.in/SKT/manual.html and https://sanskrit.uohyd.ac.in/SKT/DICO/index.en.html.
+- Compare an offline native prototype against Vidyut (Rust; segmentation and morphology, with separately sourced data): https://github.com/ambuda-org/vidyut and https://github.com/ambuda-org/vidyut/blob/main/vidyut-cheda/README.md. A third approach is to precompute analyses of the app's fixed book verses and ship reviewed annotations with book downloads. Test ambiguous compounds, word-to-verse mapping, speed, memory, accessibility and accuracy against expert-reviewed samples on real iOS and Android devices.
+- An optional download should clearly show measured compressed and installed sizes, source, language coverage and removal controls, then work offline. An analysis engine identifies candidate forms; dictionary senses do not by themselves establish the contextual meaning or alignment with an existing translation. Hindi meanings require an appropriately licensed source.
+- Review licenses for each exact engine, dictionary, model, corpus and generated data, plus mobile-store compatibility. The Heritage dictionary distribution at https://scl.samsaadhanii.in/SKT/goldendict.html states CC BY-NC 4.0; do not assume permission for a commercial app. The Zen library is LGPL, which does not settle the separate data rights. Evaluate the Cologne digital Monier-Williams edition and its CC BY-SA 4.0 terms as another English dictionary source: https://github.com/sanskrit-lexicon/MWS. A user-initiated download does not itself resolve redistribution or commercial-use rights.
+
+### Japa mala and meditation
+
+- Explore a local 108-bead counter with an accessible large tap target, visual progress, optional haptics, a completion chime and optional ambient tanpura or flute. Consider Om and other mantra recordings, repeat rounds, and locally saved progress. Keep sound and haptics independently controllable and respect system settings and devices without haptic hardware.
+- The counter must work without internet; bundle small licensed sounds or let users download and retain audio for offline use. Verify composition, performance and recording rights separately, including commercial use. Clearly distinguish spoken synthesis from authentic chant recordings.
+- Explore accessible external switches and platform-supported input. Do not rely on volume buttons: Apple's App Review rules restrict altering standard volume controls; Android behavior and device support also need investigation. Avoid promising background counting or screen-off input without platform-specific validation.
+
+### Verse or thought of the day
+
+- Select a passage once per local calendar day from an editorially reviewed pool, using stable passage IDs and a locally stored choice or deterministic selection. Open that exact passage in its book. Decide how to handle time zone changes, missing downloads, unavailable languages and paid books; do not assume all passage text is installed.
+- A small bundled catalog or eligible downloaded books can support an offline daily selection. Optional reminders could use local notifications with permission, subject to operating-system scheduling limits. A future server-curated shared selection can use the same IDs, cache data for offline access and fall back locally when unavailable.
+- Keep scriptural verses distinct from separately authored thoughts, review attribution and accuracy, and verify rights for every source.
+
+
+## Accounts and understanding adoption — proposal, November 2026
+
+The owner wants to understand who is downloading DivineCanvas and is considering login. The app is intended to stay free and ad-free for now. This is a proposal for investigation, not an implemented login, analytics system, privacy policy or change to the offline reader.
+
+### Immediate measurement and optional accounts
+
+- Start with aggregated App Store Connect and Google Play Console download/acquisition metrics; these do not reveal named downloaders and do not capture all sideloaded installs. Metrics, privacy thresholds and opt-in availability differ by store. TestFlight provides beta tester and install metrics separately. A login only counts people who register, not every downloader, and one person may use multiple devices.
+- Apple guideline 5.1.1(v) says apps without significant account-based features must allow use without login. Keep guest reading and previously downloaded books available offline. Consider optional accounts when they offer an actual user benefit, such as explicit cross-device backup and sync of chosen data. Signing in and initial account creation require connectivity; define offline session expiration, sign-out, recovery and conflict behavior before building.
+- Explore email-based passwordless login or passkeys via a managed authentication provider; evaluate Apple and Google sign-in and privacy requirements, provider pricing, export, data residency, account recovery and vendor dependence. Under Apple 4.8, applicable third-party primary login services require an equivalent privacy-preserving option unless an exception applies. User consent to download assets is separate from privacy disclosures and legal bases for personal data.
+
+### Data minimization and design
+
+- If an account is needed, consider a random account ID, verified email or provider identifier, account creation date and necessary security/session records. Email addresses may be relay addresses; do not assume a name or real email is available. Set justified retention limits and avoid collecting phone numbers, location, contacts, advertising identifiers or demographic details by default. Do not add analytics SDKs or identifiers without a documented need and disclosure.
+- Reading history, notes, favorites, chapter selection and religious practice can be sensitive or reveal beliefs in context. Keep these local by default. Any future cloud sync should be separately explained and explicitly enabled, limited to the user's selections, and designed after a jurisdiction-specific legal/privacy review. Do not infer or profile religion. User-linked identifiers and pseudonymous identifiers can still be personal data.
+- Use a reputable identity service, encrypted transport and encrypted storage, OS-protected session tokens, least-privilege database rules, server-side authorization, narrowly restricted administrator access, MFA for administrators, audit logs, backups, documented retention and deletion workflows. Do not store plaintext passwords. Avoid promising end-to-end encryption unless its key management, account recovery and limitations are actually designed and verified. App analytics must not collect verse-level religious usage or notes by default.
+- Test deletion across the identity provider, application database and vendors; document backup expiry, any legally required retention and whether local data remains. Let users know what happens before deletion. Determine separately whether a deletion request should also offer deletion of locally stored material.
+
+### Store requirements and legal review before launch
+
+- Apple requires an accessible privacy policy in app and store metadata, accurate App Privacy disclosures including third-party SDKs, data minimization, and in-app account deletion initiation when account creation exists. Apply login-services guideline 4.8 where relevant and revoke Sign in with Apple tokens on deletion. Supply review access or a suitable demo.
+- Google Play requires an accessible privacy policy in the store listing and app, accurate Data safety declarations including SDKs, secure handling, and in-app plus web-based account-deletion requests for accounts created in the app. Delete associated account data, subject to disclosed legitimate retention; provide prominent disclosure and affirmative consent when its policy requires them.
+- Review applicable privacy laws, target regions, children and age policies, legal basis and potentially sensitive religious information with qualified counsel before collecting or syncing data. Specify controller, providers, purposes, sharing, retention, access/correction/deletion, contact and cross-border transfers in the policy. No implementation is authorized solely by this proposal.
+
+References: https://developer.apple.com/app-store/review/guidelines/ ; https://developer.apple.com/app-store/app-privacy-details/ ; https://developer.apple.com/help/app-review/guideline-reference/5-1-1-account-deletion/ ; https://developer.apple.com/app-store-connect/analytics/ ; https://developer.apple.com/help/app-store-connect/test-a-beta-version/view-build-status-and-metrics/ ; https://support.google.com/googleplay/android-developer/answer/10144311 ; https://support.google.com/googleplay/android-developer/answer/13327111 ; https://support.google.com/googleplay/android-developer/answer/10787469 ; https://support.google.com/googleplay/android-developer/answer/139628 ; https://www.edpb.europa.eu/sme/learn-the-basics/data-protection-basics_en .

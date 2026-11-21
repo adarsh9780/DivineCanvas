@@ -36,7 +36,7 @@ Local information generally remains on your device until you remove it or uninst
 
 ## Questions and changes
 
-For privacy questions or requests, contact **tanyamaurya2001@gmail.com** (provisional; confirm before publication). We will update this policy as our practices change and update the date above. If the app begins collecting additional information or using advertising, analytics, accounts or cloud services, we will describe those changes and obtain consent where required.
+A privacy contact must be added before publication. We will update this policy as our practices change and update the date above. If the app begins collecting additional information or using advertising, analytics, accounts or cloud services, we will describe those changes and obtain consent where required.
 
 ---
 
