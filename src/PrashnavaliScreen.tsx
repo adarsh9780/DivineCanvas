@@ -9,6 +9,7 @@ import dataset from './data/prashnavali.json';
 import { useAppLanguage } from './AppLanguage';
 import { palettes, type ColorTheme, type Palette } from './readingAppearance';
 import { locateCell, isEdgeCell, resultForCell } from './prashnavaliLogic';
+import { PRASHNAVALI_WALKTHROUGH_KEY, readerWalkthroughSeen } from './readerWalkthrough';
 
 const reflections = [
   ['एक शुभ आशीर्वाद की तरह इसे आशा और विश्वास के साथ ग्रहण किया जाता है।', 'Traditionally received as an encouraging blessing of hope and confidence.'],
@@ -51,6 +52,8 @@ export default function PrashnavaliScreen() {
   const [dragging,setDragging] = useState(false);
   const [answer,setAnswer] = useState<number|null>(null);
   const [showInfo,setShowInfo] = useState(false);
+  const [walkthroughVisible,setWalkthroughVisible] = useState(false);
+  const [walkthroughSaving,setWalkthroughSaving] = useState(false);
   const [soundEnabled,setSoundEnabled] = useState(true);
   const [vibrationEnabled,setVibrationEnabled] = useState(true);
   const [feedbackReady,setFeedbackReady] = useState(false);
@@ -76,16 +79,26 @@ export default function PrashnavaliScreen() {
     (async () => {
       const db = await SQLite.openDatabaseAsync('kgram.db');
       await db.execAsync('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)');
-      const rows = await db.getAllAsync<{key:string;value:string}>("SELECT key,value FROM settings WHERE key IN ('prashnavali-sound','prashnavali-vibration')");
+      const rows = await db.getAllAsync<{key:string;value:string}>("SELECT key,value FROM settings WHERE key IN ('prashnavali-sound','prashnavali-vibration','prashnavali-walkthrough-seen')");
       if (!live) return;
       settingsDb.current = db;
       const sound = rows.find(row => row.key==='prashnavali-sound')?.value !== 'false';
       const vibration = rows.find(row => row.key==='prashnavali-vibration')?.value !== 'false';
       soundRef.current=sound; vibrationRef.current=vibration;
       setSoundEnabled(sound); setVibrationEnabled(vibration); setFeedbackReady(true);
+      setWalkthroughVisible(!readerWalkthroughSeen(rows.find(row => row.key===PRASHNAVALI_WALKTHROUGH_KEY)?.value));
     })().catch(() => {if (live) setFeedbackReady(true);});
     return () => {live=false;};
   },[]);
+  async function finishWalkthrough() {
+    if (walkthroughSaving || !settingsDb.current) return;
+    setWalkthroughSaving(true);
+    try {
+      await settingsDb.current.runAsync('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)',PRASHNAVALI_WALKTHROUGH_KEY,'true');
+      setWalkthroughVisible(false);
+    } catch {Alert.alert(appLanguage==='hi'?'सहेजा नहीं जा सका':'Could not save',appLanguage==='hi'?'कृपया फिर प्रयास करें।':'Please try again.');}
+    finally {setWalkthroughSaving(false);}
+  }
   function saveFeedback(kind:'sound'|'vibration', enabled:boolean) {
     if (!settingsDb.current) {Alert.alert(appLanguage==='hi'?'सेटिंग सहेजी नहीं जा सकी':'Could not save setting', appLanguage==='hi'?'कृपया ऐप फिर से खोलें।':'Please reopen the app and try again.'); return;}
     if (kind==='sound') {soundRef.current=enabled; setSoundEnabled(enabled); if (!enabled) [...tickPlayers,...edgePlayers].forEach(player => player.pause());}
@@ -143,6 +156,20 @@ export default function PrashnavaliScreen() {
       <Text accessibilityRole="header" style={styles.headerTitle}>{t("Prashnavali")}</Text>
       <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'प्रश्नावली की जानकारी और सेटिंग':'Prashnavali information and settings'} onPress={() => setShowInfo(true)} style={[styles.headerButton,{alignItems:'flex-end'}]}><Text style={styles.info}>ⓘ</Text></Pressable>
     </View>
+    <Modal visible={walkthroughVisible} transparent animationType="fade" onRequestClose={() => void finishWalkthrough()}>
+      <SafeAreaProvider><SafeAreaView style={styles.walkthroughOverlay}>
+        <ScrollView contentContainerStyle={styles.walkthroughScroll}><View accessibilityViewIsModal style={styles.walkthroughCard}>
+          <View style={{gap:8}}><Text accessibilityRole="header" style={styles.walkthroughTitle}>{appLanguage==='hi'?'प्रश्नावली का परिचय':'Welcome to Prashnavali'}</Text><Text style={styles.walkthroughBody}>{appLanguage==='hi'?'मन में एक प्रश्न रखें और श्री राम प्रश्नावली से मार्गदर्शन लें।':'Hold a question in your heart, then choose a square on the board.'}</Text></View>
+          <View style={{gap:16}}>
+            <View style={{gap:4}}><Text style={styles.feedbackTitle}>{appLanguage==='hi'?'अक्षर चुनें':'Choose a square'}</Text><Text style={styles.walkthroughBody}>{appLanguage==='hi'?'किसी अक्षर को छुएँ, या बोर्ड पर उंगली घुमाएँ और चुनने के लिए उठाएँ।':'Touch a square, or slide your finger across the board and lift it to choose.'}</Text></View>
+            <View style={{gap:4}}><Text style={styles.feedbackTitle}>{appLanguage==='hi'?'अपना उत्तर पढ़ें':'Read your answer'}</Text><Text style={styles.walkthroughBody}>{appLanguage==='hi'?'चुनी हुई चौपाई, उसका अर्थ और पारंपरिक संकेत देखें।':'See the chosen passage, its meaning and a traditional reflection.'}</Text></View>
+            <View style={{gap:4}}><Text style={styles.feedbackTitle}>{appLanguage==='hi'?'ध्वनि और कंपन':'Sound and vibration'}</Text><Text style={styles.walkthroughBody}>{appLanguage==='hi'?'इन्हें बदलने के लिए ऊपर ⓘ पर जाएँ।':'Use ⓘ at the top to change the feedback settings.'}</Text></View>
+          </View>
+          <Text style={styles.infoHint}>{appLanguage==='hi'?'आप सेटिंग में इस परिचय को फिर से देख सकते हैं।':'You can reset this guide in Settings.'}</Text>
+          <View style={styles.walkthroughActions}><Pressable accessibilityRole="button" disabled={walkthroughSaving} onPress={() => void finishWalkthrough()} style={styles.walkthroughButton}><Text style={{color:colors.muted,fontSize:15}}>{appLanguage==='hi'?'छोड़ें':'Skip'}</Text></Pressable><Pressable accessibilityRole="button" disabled={walkthroughSaving} onPress={() => void finishWalkthrough()} style={[styles.walkthroughButton,{backgroundColor:colors.accent}]}><Text style={{color:colors.onAccent,fontSize:15,fontWeight:'600'}}>{appLanguage==='hi'?'समझ गया':'Got it'}</Text></Pressable></View>
+        </View></ScrollView>
+      </SafeAreaView></SafeAreaProvider>
+    </Modal>
     <Modal visible={showInfo} animationType="slide" onRequestClose={() => setShowInfo(false)}>
       <SafeAreaProvider><SafeAreaView style={styles.root}>
         <View style={styles.header}><Pressable accessibilityRole="button" accessibilityLabel={t("Back to reader")} onPress={() => setShowInfo(false)} style={styles.headerButton}><Text style={styles.back}>‹</Text></Pressable><Text accessibilityRole="header" style={styles.headerTitle}>{appLanguage==='hi'?'प्रश्नावली की जानकारी':'About Prashnavali'}</Text><View style={styles.headerButton}/></View>
@@ -190,5 +217,6 @@ export default function PrashnavaliScreen() {
   </SafeAreaView>;
 }
 function createStyles(c:Palette) {return StyleSheet.create({
+  walkthroughOverlay:{flex:1,backgroundColor:'#0009',justifyContent:'center',padding:24},walkthroughScroll:{flexGrow:1,justifyContent:'center'},walkthroughCard:{backgroundColor:c.white,borderRadius:20,padding:24,gap:20,maxWidth:480,width:'100%',alignSelf:'center'},walkthroughTitle:{fontSize:22,fontWeight:'700',color:c.ink},walkthroughBody:{fontSize:15,lineHeight:23,color:c.muted},walkthroughActions:{flexDirection:'row',alignItems:'center',justifyContent:'flex-end',gap:12,flexWrap:'wrap'},walkthroughButton:{paddingVertical:12,paddingHorizontal:18,borderRadius:20},
   root:{flex:1,backgroundColor:c.paper},header:{height:56,flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16},headerButton:{width:44,height:44,justifyContent:'center'},back:{fontSize:34,color:c.ink,lineHeight:40},headerTitle:{fontSize:17,fontWeight:'600',color:c.ink},info:{fontSize:22,color:c.ink},infoContent:{paddingHorizontal:24,paddingTop:20,paddingBottom:40,gap:16},infoHint:{fontSize:14,lineHeight:21,color:c.muted},feedbackRow:{minHeight:76,flexDirection:'row',alignItems:'center',gap:16,borderBottomWidth:1,borderColor:c.line,paddingVertical:12},feedbackText:{flex:1,gap:4},feedbackTitle:{fontSize:16,fontWeight:'600',color:c.ink},infoLink:{fontSize:14,color:c.accent,textDecorationLine:'underline'},content:{paddingHorizontal:20,paddingBottom:16,alignItems:'center'},boardContent:{flexGrow:1,justifyContent:'center'},intro:{alignItems:'center',maxWidth:420,paddingTop:20},eyebrow:{fontSize:11,letterSpacing:1.5,color:c.accent,fontWeight:'700'},title:{fontSize:27,color:c.ink,fontWeight:'600',marginTop:10},subtitle:{fontSize:14,lineHeight:21,color:c.muted,textAlign:'center',marginTop:10},preview:{height:40,justifyContent:'center',alignItems:'center'},previewText:{fontSize:27,color:c.accent,fontWeight:'600'},board:{borderWidth:1,borderColor:c.accent,backgroundColor:c.white,overflow:'hidden'},row:{flexDirection:'row'},cell:{alignItems:'center',justifyContent:'center',borderWidth:StyleSheet.hairlineWidth,borderColor:c.line},cellActive:{backgroundColor:c.accent},cellText:{color:c.ink,includeFontPadding:false},cellTextActive:{color:c.onAccent},hapticRow:{width:'100%',maxWidth:510,flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:24,gap:12},hapticTitle:{fontSize:15,color:c.ink,fontWeight:'600'},hapticHint:{fontSize:13,color:c.muted,marginTop:4},creditButton:{marginTop:28,paddingVertical:8},credit:{fontSize:13,color:c.muted,textDecorationLine:'underline'},result:{width:'100%',maxWidth:510,paddingTop:32},resultTitle:{fontSize:29,color:c.ink,fontWeight:'600',marginTop:16},resultSubtitle:{fontSize:14,color:c.muted,marginTop:4},rule:{height:1,backgroundColor:c.line,marginVertical:24},verse:{fontSize:26,lineHeight:42,color:c.ink},reference:{fontSize:13,color:c.muted,marginTop:12},languageRow:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:28},sectionLabel:{fontSize:11,letterSpacing:1,color:c.accent,fontWeight:'700',marginTop:24},languageButton:{paddingHorizontal:14,paddingVertical:8,borderWidth:1,borderColor:c.line,borderRadius:20},languageText:{fontSize:13,fontWeight:'600',color:c.ink},meaning:{fontSize:17,lineHeight:27,color:c.ink,marginTop:12},primary:{marginTop:32,backgroundColor:c.accent,borderRadius:24,paddingVertical:14,alignItems:'center'},primaryText:{color:c.onAccent,fontSize:15,fontWeight:'600'},
 });}
