@@ -105,7 +105,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const sharing = useRef(false);
   const [sharingId, setSharingId] = useState<string | null>(null);
   const [splitSettingsStack, setSplitSettingsStack] = useState<SettingsPage[]>(['language']);
-  const [profileName, setProfileName] = useState('');
   function openSettingsPage(page:Exclude<SettingsPage,'menu'>) {
     if (isWideIPad) {
       setSplitSettingsStack(current => pathname.startsWith('/settings') ? [...current,page] : ['reading',page]);
@@ -367,9 +366,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
       if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
       else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
-      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds', 'profile-display-name')");
+      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'auto-scroll-enabled', 'auto-scroll-seconds')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
-      setProfileName((values['profile-display-name'] ?? '').trim().slice(0,60));
       setWalkthroughSeen(readerWalkthroughSeen(values[READER_WALKTHROUGH_KEY]));
       setDefaultImmersive(values['default-fullscreen'] === 'true');
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
@@ -410,17 +408,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     preferenceWrites.current = preferenceWrites.current.then(() => setting(key, value))
       .catch(() => Alert.alert(t("Setting could not be saved"), t("Please try selecting it again.")));
   }, [setting, t]);
-  function editProfileName() {
-    Alert.prompt(appLanguage==='hi'?'अपना नाम':'Your name',
-      appLanguage==='hi'?'यह नाम केवल इस डिवाइस पर रहता है।':'This name stays on this device.',
-      [
-        {text:appLanguage==='hi'?'रद्द करें':'Cancel',style:'cancel'},
-        {text:appLanguage==='hi'?'सहेजें':'Save',onPress:value => {
-          const name=(value ?? '').trim().slice(0,60);
-          void (async () => {try {await setting('profile-display-name',name); setProfileName(name);} catch {Alert.alert(t('Setting could not be saved'),t('Please try selecting it again.'));}})();
-        }},
-      ],'plain-text',profileName);
-  }
   async function finishWalkthrough() {
     if (walkthroughSaving || !db.current) return;
     setWalkthroughSaving(true);
@@ -1085,11 +1072,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     return <View style={{flex:1,flexDirection:'row',backgroundColor:colors.paper}}>
       <SafeAreaView edges={['left','bottom']} style={{width:Math.min(320,width*0.34),backgroundColor:colors.white,borderRightWidth:StyleSheet.hairlineWidth,borderRightColor:colors.line}}>
         <TabSafeAreaView edges={{top:true}} style={{flex:1}}>
-        <ScrollView contentContainerStyle={{paddingHorizontal:12,paddingTop:4,paddingBottom:24}}>
-          <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'अपना नाम बदलें':'Edit your name'} onPress={editProfileName} style={({pressed}) => ({minHeight:56,flexDirection:'row',alignItems:'center',gap:12,paddingHorizontal:12,marginBottom:8,opacity:pressed?0.65:1})}>
-            <View style={{width:40,height:40,borderRadius:20,alignItems:'center',justifyContent:'center',backgroundColor:colors.line}}><SymbolView name="person.fill" size={23} tintColor={colors.accent} accessible={false}/></View>
-            <View style={{flex:1,gap:4}}><Text numberOfLines={1} style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{profileName || (appLanguage==='hi'?'पाठक':'Reader')}</Text><Text style={{fontSize:13,color:colors.muted}}>{appLanguage==='hi'?'नाम बदलें · इस डिवाइस पर':'Edit name · On this device'}</Text></View>
-          </Pressable>
+        <ScrollView contentContainerStyle={{paddingHorizontal:12,paddingTop:16,paddingBottom:24}}>
           {items.map(item => <Pressable key={item.page} accessibilityRole="button" accessibilityState={{selected:selectedPage===item.page}} onPress={() => {
             if (selectedPage === item.page && currentPage === item.page) return;
             setSplitSettingsStack([item.page]);
