@@ -151,7 +151,7 @@ export default function PrashnavaliScreen() {
   }
   const result=answer===null ? null : dataset.results[answer];
   return <SafeAreaView style={styles.root} edges={['left','right','bottom']}>
-    <Stack.Screen options={{headerShown:true,title:t('Prashnavali'),headerTintColor:colors.ink,headerStyle:{backgroundColor:colors.paper},headerShadowVisible:false,headerBackButtonDisplayMode:'minimal',gestureEnabled:false,headerRight:() => <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'प्रश्नावली की जानकारी और सेटिंग':'Prashnavali information and settings'} onPress={() => setShowInfo(true)} style={styles.headerButton}><SymbolView name={{ios:'info.circle',android:'info',web:'info'}} size={23} tintColor={colors.ink}/></Pressable>}}/>
+    <Stack.Screen options={{headerShown:true,title:t('Prashnavali'),headerTintColor:colors.ink,headerStyle:{backgroundColor:colors.paper},headerShadowVisible:false,headerBackButtonDisplayMode:'minimal',gestureEnabled:false,headerRight:() => <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'प्रश्नावली की जानकारी और सेटिंग':'Prashnavali information and settings'} onPress={() => setShowInfo(true)} style={[styles.headerButton,{alignItems:'center'}]}><SymbolView name={{ios:'info.circle',android:'info',web:'info'}} size={23} tintColor={colors.ink}/></Pressable>}}/>
     <Modal visible={walkthroughVisible} transparent animationType="fade" onRequestClose={() => void finishWalkthrough()}>
       <SafeAreaProvider><SafeAreaView style={styles.walkthroughOverlay}>
         <ScrollView contentContainerStyle={styles.walkthroughScroll}><View accessibilityViewIsModal style={styles.walkthroughCard}>
