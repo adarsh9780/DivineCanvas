@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, Alert, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
+import { SymbolView } from 'expo-symbols';
 import * as Haptics from 'expo-haptics';
 import * as SQLite from 'expo-sqlite';
 import { useAudioPlayer } from 'expo-audio';
@@ -35,7 +36,6 @@ function cellHaptic(kind:'tick'|'edge'|'confirm') {
 
 export default function PrashnavaliScreen() {
   const {appLanguage,t} = useAppLanguage();
-  const router = useRouter();
   const {theme} = useLocalSearchParams<{theme?:string}>();
   const colorTheme:ColorTheme = theme && Object.hasOwn(palettes,theme) ? theme as ColorTheme : 'paper';
   const colors = palettes[colorTheme];
@@ -150,12 +150,8 @@ export default function PrashnavaliScreen() {
     else feedback('tick');
   }
   const result=answer===null ? null : dataset.results[answer];
-  return <SafeAreaView style={styles.root}>
-    <View style={styles.header}>
-      <Pressable accessibilityRole="button" accessibilityLabel={t("Back to books")} onPress={() => router.back()} style={styles.headerButton}><Text style={styles.back}>‹</Text></Pressable>
-      <Text accessibilityRole="header" style={styles.headerTitle}>{t("Prashnavali")}</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'प्रश्नावली की जानकारी और सेटिंग':'Prashnavali information and settings'} onPress={() => setShowInfo(true)} style={[styles.headerButton,{alignItems:'flex-end'}]}><Text style={styles.info}>ⓘ</Text></Pressable>
-    </View>
+  return <SafeAreaView style={styles.root} edges={['left','right','bottom']}>
+    <Stack.Screen options={{headerShown:true,title:t('Prashnavali'),headerTintColor:colors.ink,headerStyle:{backgroundColor:colors.paper},headerShadowVisible:false,headerBackButtonDisplayMode:'minimal',gestureEnabled:false,headerRight:() => <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'प्रश्नावली की जानकारी और सेटिंग':'Prashnavali information and settings'} onPress={() => setShowInfo(true)} style={styles.headerButton}><SymbolView name={{ios:'info.circle',android:'info',web:'info'}} size={23} tintColor={colors.ink}/></Pressable>}}/>
     <Modal visible={walkthroughVisible} transparent animationType="fade" onRequestClose={() => void finishWalkthrough()}>
       <SafeAreaProvider><SafeAreaView style={styles.walkthroughOverlay}>
         <ScrollView contentContainerStyle={styles.walkthroughScroll}><View accessibilityViewIsModal style={styles.walkthroughCard}>
