@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, '..');
 const ts = require(root + '/node_modules/typescript');
 const compiled = ts.transpileModule(fs.readFileSync(root + '/src/readingProgress.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 const api = {}; new Function('exports', compiled)(api);
-const { chapterPositionKey, chapterPositionPrefix, bookPositionKey, chapterResumeIndex, chapterReadingProgress, legacyGitaPositionCopies, SAVE_POSITION_SQL, CHAPTER_POSITION_PREFIX } = api;
+const { chapterPositionKey, chapterPositionPrefix, bookPositionKey, chapterResumeIndex, chapterBounds, chapterReadingProgress, legacyGitaPositionCopies, SAVE_POSITION_SQL, CHAPTER_POSITION_PREFIX } = api;
 const entries = [{id:'gita:1:1',chapter:1,label:'TEXT 1'},{id:'gita:1:2',chapter:1,label:'TEXT 2'},{id:'gita:2:1',chapter:2,label:'TEXT 1'},{id:'gita:2:2-3',chapter:2,label:'TEXTS 2-3'}];
 const other = [{id:'other:1:1',chapter:1,label:'TEXT 1'},{id:'other:1:2',chapter:1,label:'TEXT 2'}];
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'divinecanvas-progress-'));
@@ -27,6 +27,8 @@ assert.equal(get(chapterPositionKey('other',1)),'other:1:2');
 assert.notEqual(chapterPositionPrefix('gita'),chapterPositionPrefix('other'));
 assert.equal(chapterResumeIndex(entries,2,get(chapterPositionKey('gita',2))),3);
 assert.equal(chapterResumeIndex(entries,2,'gita:1:2'),2);
+assert.deepEqual(chapterBounds(entries,2),{first:2,count:2});
+assert.equal(chapterBounds(entries,99),undefined);
 assert.equal(db.prepare('SELECT note FROM saves').get().note,'Keep my note');
 const legacy = [
  {key:CHAPTER_POSITION_PREFIX+'1',value:'gita:1:2'},

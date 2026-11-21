@@ -1,0 +1,17 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const ts = require('typescript');
+const source = fs.readFileSync('src/chapterScrubPosition.ts', 'utf8');
+const compiled = ts.transpileModule(source, {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+const api = {}; new Function('exports', compiled)(api);
+const position = api.chapterScrubPosition;
+assert.equal(position(0,168,47,168),46);
+assert.equal(position(46,-168,47,168),0);
+assert.equal(position(23,84,47,168),46);
+assert.equal(position(23,-84,47,168),0);
+assert.equal(position(0,168,3000,168),2999);
+assert.equal(position(6,500,12,168),11);
+assert.equal(position(6,-500,12,168),0);
+assert.equal(position(0,100,1,168),0);
+assert.equal(position(0,100,0,168),0);
+console.log('PASS: one full-width drag traverses the chapter and clamps at its ends.');

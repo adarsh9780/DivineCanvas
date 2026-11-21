@@ -34,6 +34,10 @@ function indexChapters(passages:LocatedPassage[]) {
   cache.set(passages,index);
   return index;
 }
+export function chapterBounds(passages:LocatedPassage[], chapter:number):{first:number; count:number} | undefined {
+  const entry=indexChapters(passages).get(chapter);
+  return entry ? {first:entry.first,count:entry.entries.length} : undefined;
+}
 export function chapterResumeIndex(passages: LocatedPassage[], chapter:number, savedId?:string):number {
   const entry = indexChapters(passages).get(chapter);
   return entry ? (savedId ? entry.byId.get(savedId) ?? entry.first : entry.first) : -1;
