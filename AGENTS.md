@@ -33,6 +33,8 @@ Run lint and typecheck before declaring any task done.
 
 Ask the user and wait for their explicit approval before starting, queuing, submitting, retrying, or triggering any build, including local native builds, EAS builds, and builds triggered through CI. Name the platform, profile, and artifact in the request. Approval applies to that specific build. Code changes, commits, and pushes are separate from build approval. EAS builds use the user's limited quota.
 
+After dispatching an approved build, send the run link to the user and end the turn. Resume when the user reports the result.
+
 Use EAS to build, sign, and submit the app in the cloud (`eas build`, `eas submit`) and to ship over-the-air updates (`eas update`) — no local Xcode or Android Studio required. Run EAS CLI as `bunx eas-cli <command>` in Bun projects, or `npx eas-cli@latest <command>` otherwise; substitute that for bare `eas` in docs examples.
 Docs: https://docs.expo.dev/eas/index.md
 
