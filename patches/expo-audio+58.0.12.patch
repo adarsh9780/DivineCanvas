@@ -1,3 +1,17 @@
+diff --git a/node_modules/expo-audio/android/build.gradle b/node_modules/expo-audio/android/build.gradle
+index cd195cb..6747842 100644
+--- a/node_modules/expo-audio/android/build.gradle
++++ b/node_modules/expo-audio/android/build.gradle
+@@ -26,7 +26,8 @@ dependencies {
+   implementation 'androidx.appcompat:appcompat:1.7.1'
+   implementation 'androidx.core:core-ktx:1.15.0'
+ 
+-  def androidxMedia3Version = "1.9.1"
++  // Media3 1.11 fixes stale playlist timelines crashing the lock-screen controller.
++  def androidxMedia3Version = "1.11.1"
+   implementation "androidx.media3:media3-session:$androidxMedia3Version"
+   implementation "androidx.media3:media3-exoplayer:$androidxMedia3Version"
+   implementation "androidx.media3:media3-exoplayer-dash:$androidxMedia3Version"
 diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
 index 6c81fce..cd5f115 100644
 --- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
