@@ -195,6 +195,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const currentIndex = useRef(0);
   const [touchingReader, setTouchingReader] = useState(false);
   const [chapterScrubbing,setChapterScrubbing] = useState(false);
+  const [languageControlWidth,setLanguageControlWidth] = useState(110);
+  const [webAudioMenuOpen,setWebAudioMenuOpen] = useState(false);
   const [interactionCount, setInteractionCount] = useState(0);
   const continuationNavigator = useRef<{advance:()=>boolean; hasMore:()=>boolean} | null>(null);
   const [continuationPending, setContinuationPending] = useState(false);
@@ -395,6 +397,15 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const [editing, setEditing] = useState<string | null>(null);
   const activeSelection = useRef<{passageId:string; language:'en'|'hi'|'sa'; start:number; end:number; anchorStart:number; anchorEnd:number} | null>(null);
   const previousWordTap = useRef<Tap | null>(null);
+  const passageTapStart = useRef<{x:number;y:number;time:number;passageId:string}|null>(null);
+  const ignorePassageTap = useRef(false);
+  const pendingLanguageTap = useRef<{tap:Tap; timer:ReturnType<typeof setTimeout>}|null>(null);
+  useEffect(() => () => {
+    if (pendingLanguageTap.current) clearTimeout(pendingLanguageTap.current.timer);
+    pendingLanguageTap.current=null;
+    passageTapStart.current=null;
+    ignorePassageTap.current=false;
+  }, [screen, index, language, activeBookId, isBooksActive]);
   const protectSelectionUntil = useRef(0);
   const touchStart = useRef<{x:number; y:number; time:number; selection:NonNullable<typeof activeSelection.current>} | null>(null);
   const [selectedWord, setSelectedWord] = useState<typeof activeSelection.current>(null);
@@ -1429,12 +1440,60 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           {dictionaryStatus === 'error' && <><Text style={styles.dictionaryBody}>{dictionaryError}</Text><Pressable accessibilityRole="button" onPress={() => dictionaryWord && void showWord(dictionaryWord, dictionaryLanguage, true)} style={[styles.button,styles.buttonPrimary,styles.doneButton]}><Text style={styles.selectedText}>{t("Try again")}</Text></Pressable></>}
           {dictionaryStatus === 'results' && (meanings.length ? meanings.map(group => <View key={group.partOfSpeech} style={styles.dictionaryGroup}><Text style={styles.preferenceLabel}>{group.partOfSpeech}</Text>{group.definitions.map((definition, i) => <Text key={i} style={styles.dictionaryBody}>{i + 1}. {definition}</Text>)}</View>) : <Text style={styles.dictionaryBody}>{t("No definition found for this word.")}</Text>)}
       </ScrollView>;
-  const readerHeaderLeft = <Pressable accessibilityRole="button" accessibilityLabel={t("Chapters")} onPress={() => router.push('/chapters')} style={styles.profileButton}>
+  function cancelPendingLanguageTap() {
+    if (pendingLanguageTap.current) clearTimeout(pendingLanguageTap.current.timer);
+    pendingLanguageTap.current=null;
+  }
+  function switchReadingLanguage() {
+    cancelPendingLanguageTap();
+    activeSelection.current=null;
+    setSelectedWord(null);
+    previousWordTap.current=null;
+    const next=activeBook.languages[(activeBook.languages.indexOf(language)+1)%activeBook.languages.length];
+    setLanguage(next);
+    void setting('language',next);
+  }
+  function toggleReadingMusic() {
+    cancelPendingLanguageTap();
+    if (musicFailed && musicEnabled) {retryMusic(); return;}
+    const next=!musicEnabled;
+    setMusicEnabled(next);
+    if (!next) setMusicError(false);
+    void setting('music-enabled',String(next));
+  }
+  function toggleReaderNarration() {
+    cancelPendingLanguageTap();
+    if (readAloudRef.current) pauseReadAloud();
+    else toggleReadAloud(true);
+  }
+  function handlePassageTap(event:GestureResponderEvent, passageId:string) {
+    const start=passageTapStart.current;
+    passageTapStart.current=null;
+    if (!start || start.passageId!==passageId || Date.now()-start.time>350 || Math.hypot(event.nativeEvent.pageX-start.x,event.nativeEvent.pageY-start.y)>12 || activeSelection.current || pinch.current) return;
+    const tap={time:Date.now(),x:event.nativeEvent.pageX,y:event.nativeEvent.pageY,passageId};
+    const pending=pendingLanguageTap.current;
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingLanguageTap.current=null;
+      if (isDoubleTap(pending.tap,tap)) return;
+    }
+    const timer=setTimeout(() => {
+      pendingLanguageTap.current=null;
+      if (!activeSelection.current) switchReadingLanguage();
+    }, 370);
+    pendingLanguageTap.current={tap,timer};
+  }
+  // Reserve the native back button, chapter button, header margins and a 16-point gap.
+  const compactReaderControls=width-insets.left-insets.right < 48+44+languageControlWidth+44*3+8*3+32+16;
+  const narrationUnavailable=!windowRows[index];
+  const musicActionLabel=waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music");
+  const narrationActionLabel=readAloud ? t("Pause read aloud") : t("Play read aloud");
+  const readerHeaderLeft = <Pressable accessibilityRole="button" accessibilityLabel={t("Chapters")} onPress={() => {cancelPendingLanguageTap(); router.push('/chapters');}} style={styles.profileButton}>
           <SymbolView name={{ios:'list.bullet',android:'list',web:'list'}} tintColor={colors.ink} size={23}/>
         </Pressable>;
-  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage === 'hi' ? 'पाठ की भाषा बदलें। वर्तमान:' : 'Switch reading language. Current:'} ${language === 'en' ? t("English") : language === 'hi' ? t("Hindi") : t("Sanskrit")}`} onPress={() => { activeSelection.current = null; setSelectedWord(null); previousWordTap.current = null; const next = activeBook.languages[(activeBook.languages.indexOf(language) + 1) % activeBook.languages.length]; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? t("English ▾") : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
-        {Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable> : <MenuView
+  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}>{compactReaderControls ? <>{Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} onPress={() => {cancelPendingLanguageTap(); setWebAudioMenuOpen(true);}} style={styles.profileButton}><SymbolView name={{ios:'slider.horizontal.3',android:'tune',web:'tune'}} tintColor={colors.ink} size={22}/></Pressable> : <MenuView title={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} style={styles.profileButton} actions={[{id:'music',title:musicActionLabel,attributes:{disabled:waitingForMusic}},{id:'narration',title:narrationActionLabel,attributes:{disabled:narrationUnavailable}}]} onOpenMenu={() => {cancelPendingLanguageTap(); setReaderMenuOpen(true);}} onCloseMenu={() => setReaderMenuOpen(false)} onPressAction={event => {setReaderMenuOpen(false); if(event.nativeEvent.event==='music') toggleReadingMusic(); else if(event.nativeEvent.event==='narration') toggleReaderNarration();}}><View accessible accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} style={styles.profileButton}><SymbolView name={{ios:'slider.horizontal.3',android:'tune',web:'tune'}} tintColor={colors.ink} size={22}/></View></MenuView>}</> : <><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={toggleReadingMusic} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable><Pressable accessibilityRole="button" accessibilityLabel={narrationActionLabel} accessibilityState={{disabled:narrationUnavailable}} disabled={narrationUnavailable} onPress={toggleReaderNarration} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{readAloud ? <Path d="M9 5v14M15 5v14"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable></>}
+        <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage === 'hi' ? 'पाठ की भाषा बदलें। वर्तमान:' : 'Switch reading language. Current:'} ${language === 'en' ? t("English") : language === 'hi' ? t("Hindi") : t("Sanskrit")}`} onPress={switchReadingLanguage} onLayout={event => setLanguageControlWidth(event.nativeEvent.layout.width)} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? t("English ▾") : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
+        {Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => {cancelPendingLanguageTap(); setReaderMenuOpen(true);}} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable> : <MenuView
           title={t(activeBook.title)} style={styles.profileButton}
           actions={[
             {id:'like',title:Object.hasOwn(saved,currentPassage.id) ? (appLanguage==='hi'?'पसंद हटाएँ':'Unlike this verse') : (appLanguage==='hi'?'पसंद करें':'Like this verse'),state:Object.hasOwn(saved,currentPassage.id)?'on':'off'},
@@ -1444,7 +1503,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             {id:'shuffle',title:appLanguage==='hi'?'चित्रों को फिर से बदलें':'Shuffle images'},
             {id:'settings',title:t('Settings')},
           ]}
-          onOpenMenu={() => setReaderMenuOpen(true)} onCloseMenu={() => setReaderMenuOpen(false)}
+          onOpenMenu={() => {cancelPendingLanguageTap(); setReaderMenuOpen(true);}} onCloseMenu={() => setReaderMenuOpen(false)}
           onPressAction={event => {
             setReaderMenuOpen(false);
             if (event.nativeEvent.event==='like') void toggle(currentPassage);
@@ -1492,7 +1551,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         {imageFilters.length > 0 && <FilterImage key={`${width}-${readerHeight}`} source={currentBackground?.source} style={styles.filteredBackgroundImage} resizeMode="cover" filters={imageFilters}/>}
         <View style={styles.backgroundScrim}/>
       </View>}
-      {view === 'read' ? <><FlatList key={`${activeBook.id}-${readerHeight}-${width}`} ref={list} data={passages} extraData={textWindow} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null && !pinching && !chapterScrubbing} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item:metadata, index:rowIndex}) => { const loaded = windowRows[rowIndex] ? {...metadata,...windowRows[rowIndex]} : metadata; const item = loaded; const loading = !windowRows[rowIndex]; return <View style={[styles.page, useBookImages && styles.transparentPage, {height: readerHeight,paddingTop:immersive ? Math.max(24,insets.top+12) : 24,paddingBottom:Math.max(24,insets.bottom+12)}]}>
+      {view === 'read' ? <><FlatList key={`${activeBook.id}-${readerHeight}-${width}`} ref={list} data={passages} extraData={textWindow} initialScrollIndex={index} getItemLayout={(_, i) => ({length: readerHeight, offset: readerHeight * i, index: i})} pagingEnabled scrollEnabled={sharingId === null && !pinching && !chapterScrubbing} showsVerticalScrollIndicator={false} keyExtractor={p => p.id} onMomentumScrollEnd={e => { const next = Math.max(0, Math.min(passages.length - 1, Math.round(e.nativeEvent.contentOffset.y / readerHeight))); rememberPosition(next); }} renderItem={({item:metadata, index:rowIndex}) => { const loaded = windowRows[rowIndex] ? {...metadata,...windowRows[rowIndex]} : metadata; const item = loaded; const loading = !windowRows[rowIndex]; return <View onTouchStart={event => {passageTapStart.current=screen==='read' && isBooksActive && rowIndex===index && !ignorePassageTap.current && event.nativeEvent.touches.length===1 && !activeSelection.current && !readerMenuOpen && !webAudioMenuOpen && dictionaryWord===null ? {x:event.nativeEvent.pageX,y:event.nativeEvent.pageY,time:Date.now(),passageId:item.id} : null;}} onTouchEnd={event => {handlePassageTap(event,item.id); ignorePassageTap.current=false;}} onTouchCancel={() => {passageTapStart.current=null; ignorePassageTap.current=false;}} style={[styles.page, useBookImages && styles.transparentPage, {height: readerHeight,paddingTop:immersive ? Math.max(24,insets.top+12) : 24,paddingBottom:Math.max(24,insets.bottom+12)}]}>
         {loading && <View style={{position:'absolute',alignSelf:'center',top:'45%'}}>{bookTextError ? <Text style={{color:colors.muted}}>{t("Could not load this passage. Please reopen the book.")}</Text> : <ActivityIndicator color={colors.accent}/>}</View>}
 
         <PassageBody key={`${item.id}-${language}-${fontSize}-${width}-${fontScale}-${loading}`} active={rowIndex===index} registerNavigation={registerContinuation} onPartChange={onContinuationChange} text={item[language]} fontSize={fontSize} pageContentHeight={Math.max(0,readerHeight-2*(immersive ? Math.max(24,insets.top+12) : 24))} textStyle={[styles.passage, useBookImages && styles.imagePassage]} continuationColor={useBookImages ? '#ffffff' : colors.muted}
@@ -1509,7 +1568,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Pressable accessibilityRole="button" accessibilityLabel={t("Clear selection")} onPress={() => {activeSelection.current = null; setSelectedWord(null);}} style={styles.selectionButton}><Text style={styles.selectionButtonText}>{t("Done")}</Text></Pressable>
             <Text style={styles.selectionHint}>{t("Tap another word to extend")}</Text>
           </View>} />
-        {!immersive && <ReaderBottomArea paddingBottom={Platform.OS === 'web' ? 0 : Math.max(insets.bottom,16)}><View style={styles.pageBottom}><View style={[styles.actions,{marginLeft:'auto'},sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={readAloud ? t("Pause read aloud") : t("Play read aloud")} accessibilityState={{disabled:loading}} disabled={loading} onPress={() => {if (readAloudRef.current) pauseReadAloud(); else toggleReadAloud(true);}} style={styles.action}><Svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{readAloud ? <Path d="M9 5v14M15 5v14"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved,item.id) ? (appLanguage==='hi'?'पसंद हटाएँ':'Unlike verse') : (appLanguage==='hi'?'पसंद करें':'Like verse')} accessibilityState={{selected:Object.hasOwn(saved,item.id)}} onPress={() => void toggle(item)} style={styles.action}><SymbolView name={{ios:Object.hasOwn(saved,item.id)?'heart.fill':'heart',android:Object.hasOwn(saved,item.id)?'favorite':'favorite_border',web:Object.hasOwn(saved,item.id)?'favorite':'favorite_border'}} tintColor={colors.accent} size={22}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={notes[item.id] ? (appLanguage==='hi'?'नोट बदलें':'Edit note') : (appLanguage==='hi'?'नोट लिखें':'Write a note')} onPress={() => openNote(item.id)} style={styles.action}><SymbolView name={{ios:notes[item.id]?'bubble.left.fill':'bubble.left',android:notes[item.id]?'chat_bubble':'chat_bubble_outline',web:notes[item.id]?'chat_bubble':'chat_bubble_outline'}} tintColor={colors.accent} size={22}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={t("Share passage image")} accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null || loading} onPress={() => void sharePassage(item)} style={styles.action}><SymbolView name={{ios:'paperplane',android:'send',web:'send'}} tintColor={colors.accent} size={22}/></Pressable></View></View></ReaderBottomArea>}
+        {!immersive && <ReaderBottomArea paddingBottom={Platform.OS === 'web' ? 0 : Math.max(insets.bottom,16)}><View style={styles.pageBottom}><View onTouchStart={() => {ignorePassageTap.current=true; cancelPendingLanguageTap();}} style={[styles.actions,{marginLeft:'auto'},sharingId === item.id && styles.hiddenActions]}><Pressable accessibilityRole="button" accessibilityLabel={Object.hasOwn(saved,item.id) ? (appLanguage==='hi'?'पसंद हटाएँ':'Unlike verse') : (appLanguage==='hi'?'पसंद करें':'Like verse')} accessibilityState={{selected:Object.hasOwn(saved,item.id)}} onPress={() => void toggle(item)} style={styles.action}><SymbolView name={{ios:Object.hasOwn(saved,item.id)?'heart.fill':'heart',android:Object.hasOwn(saved,item.id)?'favorite':'favorite_border',web:Object.hasOwn(saved,item.id)?'favorite':'favorite_border'}} tintColor={colors.accent} size={22}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={notes[item.id] ? (appLanguage==='hi'?'नोट बदलें':'Edit note') : (appLanguage==='hi'?'नोट लिखें':'Write a note')} onPress={() => openNote(item.id)} style={styles.action}><SymbolView name={{ios:notes[item.id]?'bubble.left.fill':'bubble.left',android:notes[item.id]?'chat_bubble':'chat_bubble_outline',web:notes[item.id]?'chat_bubble':'chat_bubble_outline'}} tintColor={colors.accent} size={22}/></Pressable><Pressable accessibilityRole="button" accessibilityLabel={t("Share passage image")} accessibilityState={{busy:sharingId===item.id}} disabled={sharingId!==null || loading} onPress={() => void sharePassage(item)} style={styles.action}><SymbolView name={{ios:'paperplane',android:'send',web:'send'}} tintColor={colors.accent} size={22}/></Pressable></View></View></ReaderBottomArea>}
       </View>; }}/>{!immersive && passages[index] && (() => {
         const item=passages[index];
         const bounds=chapterBounds(passages,item.chapter);
@@ -1517,7 +1576,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         const {first,count}=bounds;
         const reference=activeBook.id === GITA_BOOK_ID ? `${appLanguage === 'hi' ? 'गीता' : activeBook.shortTitle} ${item.chapter}.${item.label.replace(/^TEXTS?\s+/i, '')}` : `${localChapter(item.chapterTitle)} · ${appLanguage === 'hi' ? item.label.replace('PASSAGE','अंश') : item.label.toLowerCase()}`;
         const referenceLabel=activeBook.id === GITA_BOOK_ID ? `${activeBook.title}, chapter ${item.chapter}, ${item.label}` : `${activeBook.title}, ${item.chapterTitle}, ${item.label}`;
-        return <ChapterScrubber current={index-first} count={count} bottom={Math.max(24,insets.bottom+12)+(Platform.OS === 'web' ? 0 : Math.max(insets.bottom,16))-12} light={useBookImages} active={chapterScrubbing} label={appLanguage==='hi'?'अध्याय में स्थिति':'Chapter position'} reference={reference} referenceLabel={referenceLabel} hint={appLanguage==='hi'?'अंश बदलने के लिए छुएँ और खींचें।':'Touch and drag to change passage.'} referenceStyle={[styles.reference,useBookImages && styles.imageReference,{textAlign:'center'}]} onActiveChange={setChapterScrubbing} onPreview={position => {const target=first+position; list.current?.scrollToIndex({index:target,animated:false}); setIndex(target);}} onSelect={position => {const target=first+position; list.current?.scrollToIndex({index:target,animated:false}); rememberPosition(target);}}/>;
+        return <ChapterScrubber current={index-first} count={count} bottom={Math.max(24,insets.bottom+12)+(Platform.OS === 'web' ? 0 : Math.max(insets.bottom,16))-12} light={useBookImages} active={chapterScrubbing} label={appLanguage==='hi'?'अध्याय में स्थिति':'Chapter position'} reference={reference} referenceLabel={referenceLabel} hint={appLanguage==='hi'?'अंश बदलने के लिए छुएँ और खींचें।':'Touch and drag to change passage.'} referenceStyle={[styles.reference,useBookImages && styles.imageReference,{textAlign:'center'}]} onActiveChange={active => {if (active) cancelPendingLanguageTap(); setChapterScrubbing(active);}} onPreview={position => {const target=first+position; list.current?.scrollToIndex({index:target,animated:false}); setIndex(target);}} onSelect={position => {const target=first+position; list.current?.scrollToIndex({index:target,animated:false}); rememberPosition(target);}}/>;
       })()}</>  : view === 'books' ? <View style={styles.section}>
         <FlatList data={books} keyExtractor={book => book.id} renderItem={({item}) => {
           const last = lastByBook[item.id] ? item.passages.find(p => p.id === lastByBook[item.id]) : undefined;
@@ -1552,6 +1611,13 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </View></ScrollView></RNHostView>
     </BottomSheet>
     {view==='read' && isBooksActive && !readerMenuOpen && !!shuffleMessage && <View pointerEvents="none" style={{position:'absolute',top:insets.top+70,alignSelf:'center',maxWidth:'85%',paddingVertical:10,paddingHorizontal:16,borderRadius:22,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line,shadowColor:'#000',shadowOpacity:0.14,shadowRadius:8,shadowOffset:{width:0,height:3},elevation:5}}><Text accessibilityLiveRegion="polite" style={{color:colors.ink,fontSize:14,textAlign:'center'}}>{shuffleMessage}</Text></View>}
+    {Platform.OS==='web' && webAudioMenuOpen && <View style={styles.readerMenuOverlay}>
+      <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'बंद करें':'Close controls'} onPress={() => setWebAudioMenuOpen(false)} style={styles.readerMenuBackdrop}/>
+      <View style={styles.sheet}>
+        <Pressable accessibilityRole="button" disabled={waitingForMusic} onPress={() => {setWebAudioMenuOpen(false); toggleReadingMusic();}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{musicActionLabel}</Text></Pressable>
+        <Pressable accessibilityRole="button" disabled={narrationUnavailable} onPress={() => {setWebAudioMenuOpen(false); toggleReaderNarration();}} style={styles.settingsListRow}><Text style={styles.readerMenuItem}>{narrationActionLabel}</Text></Pressable>
+      </View>
+    </View>}
     {Platform.OS==='web' && readerMenuOpen && <View style={styles.readerMenuOverlay}>
       <Pressable accessibilityRole="button" accessibilityLabel={t("Close book menu")} onPress={() => setReaderMenuOpen(false)} style={styles.readerMenuBackdrop}/>
       <View style={styles.sheet}>
