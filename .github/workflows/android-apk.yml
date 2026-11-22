@@ -57,8 +57,40 @@ jobs:
       - name: Generate the Android project
         run: npm exec -- expo prebuild --platform android --no-install --clean
 
+      - name: Configure EAS signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/divinecanvas-release.jks"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'android/app/build.gradle';
+          let gradle = fs.readFileSync(path, 'utf8');
+          const debugConfig = '    signingConfigs {\n        debug {';
+          const releaseConfig = `    signingConfigs {
+              release {
+                  storeFile file(System.getenv("RUNNER_TEMP") + "/divinecanvas-release.jks")
+                  storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                  keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                  keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+              }
+              debug {`;
+          if (!gradle.includes(debugConfig)) throw new Error('Android signing configuration changed');
+          gradle = gradle.replace(debugConfig, releaseConfig);
+          const releaseType = /release \{([\s\S]*?)signingConfig signingConfigs\.debug/;
+          if (!releaseType.test(gradle)) throw new Error('Android release signing configuration changed');
+          gradle = gradle.replace(releaseType, 'release {$1signingConfig signingConfigs.release');
+          gradle = gradle.replace(/versionCode \d+/, `versionCode ${100000 + Number(process.env.GITHUB_RUN_NUMBER)}`);
+          fs.writeFileSync(path, gradle);
+          NODE
+
       - name: Build the standalone ARM64 APK
         working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           ./gradlew :app:assembleRelease --no-daemon --console=plain --max-workers=2 \
             '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' \
