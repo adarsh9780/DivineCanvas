@@ -26,5 +26,5 @@ export function centeredPassageOffset(pageHeight:number, bodyHeight:number, text
   if (pageHeight <= 0 || bodyHeight <= 0 || textHeight <= 0) return 0;
   const desired = Math.max(0, (pageHeight - bodyHeight) / 2);
   const available = Math.max(0, (bodyHeight - textHeight - 64) / 2);
-  return Math.min(desired, available);
+  return Math.max(0, Math.min(desired, available) - 16);
 }
