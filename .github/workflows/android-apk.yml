@@ -29,6 +29,18 @@ jobs:
       - name: Install dependencies and apply native patches
         run: npm ci
 
+      - name: Use the runner JDK for React Native Gradle
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'node_modules/@react-native/gradle-plugin/settings.gradle.kts';
+          const settings = fs.readFileSync(path, 'utf8');
+          // setup-java already supplies JDK 17 on this runner.
+          const resolver = 'plugins { id("org.gradle.toolchains.foojay-resolver-convention").version("1.0.0") }';
+          if (!settings.includes(resolver)) throw new Error('Review the React Native JDK setup after upgrading Gradle.');
+          fs.writeFileSync(path, settings.replace(resolver, ''));
+          NODE
+
       - name: Install Android SDK packages
         run: |
           sdk_manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
