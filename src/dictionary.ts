@@ -2,7 +2,10 @@ import { File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import { findMeanings, validateArchive } from './dictionaryEngine';
 
-const SOURCE = 'https://en-word.net/static/english-wordnet-2025-json.zip';
+const SOURCES = [
+  'https://en-word.net/static/english-wordnet-2025-json.zip',
+  'https://raw.githubusercontent.com/adarsh9780/DivineCanvas/main/resources/dictionary/english-wordnet-2025-json.zip',
+];
 export const DICTIONARY_DOWNLOAD_BYTES = 9_986_555;
 function dictionaryFile() { return new File(Paths.document, 'english-wordnet-2025.zip'); }
 let downloading = false;
@@ -19,11 +22,23 @@ export async function downloadDictionary(onProgress?: (fraction: number) => void
   const temp = new File(Paths.document, 'english-wordnet-download.tmp');
   try {
     if (temp.exists) temp.delete();
-    const task = File.createDownloadTask(SOURCE, temp, {onProgress: ({bytesWritten, totalBytes}) => onProgress?.(Math.min(1, bytesWritten / (totalBytes > 0 ? totalBytes : DICTIONARY_DOWNLOAD_BYTES)))});
-    const downloaded = await task.downloadAsync();
-    if (!downloaded) throw new Error('Dictionary download was cancelled.');
-    const bytes = await temp.bytes();
-    validateArchive(bytes);
+    let lastError: unknown;
+    let valid = false;
+    for (const source of SOURCES) {
+      try {
+        if (temp.exists) temp.delete();
+        onProgress?.(0);
+        const task = File.createDownloadTask(source, temp, {onProgress: ({bytesWritten, totalBytes}) => onProgress?.(Math.min(1, bytesWritten / (totalBytes > 0 ? totalBytes : DICTIONARY_DOWNLOAD_BYTES)))});
+        const downloaded = await task.downloadAsync();
+        if (!downloaded) throw new Error('Dictionary download was cancelled.');
+        validateArchive(await temp.bytes());
+        valid = true;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!valid) throw lastError;
     const destination = dictionaryFile();
     if (destination.exists) destination.delete();
     temp.move(destination);
