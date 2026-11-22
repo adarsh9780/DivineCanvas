@@ -244,6 +244,8 @@
   "This voice requires an app build with the speech runtime. Expo Go cannot run it.": "इस आवाज़ के लिए स्पीच रनटाइम वाला ऐप बिल्ड चाहिए। Expo Go इसे नहीं चला सकता।",
   "The offline voice requires an app build with the speech runtime. Expo Go cannot run it.": "ऑफ़लाइन आवाज़ के लिए स्पीच रनटाइम वाला ऐप बिल्ड चाहिए। Expo Go इसे नहीं चला सकता।",
   "No voice is available for this language.": "इस भाषा के लिए आवाज़ उपलब्ध नहीं है।",
+  "Background read-aloud": "बैकग्राउंड में पठन",
+  "Keep read-aloud and its accompanying music playing when you lock your device or switch apps.": "डिवाइस लॉक करने या दूसरा ऐप खोलने पर पठन और उसके साथ बज रहा संगीत जारी रखें।",
   "Read each passage and move to the next when finished. Use the play button to pause or resume.": "हर अंश सुनें और पूरा होने पर अगले अंश पर जाएँ। रोकने या फिर चलाने के लिए प्ले बटन का उपयोग करें।",
   "Pause read aloud": "सस्वर पठन रोकें",
   "Play read aloud": "सस्वर पठन चलाएँ"

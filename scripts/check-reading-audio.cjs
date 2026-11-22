@@ -11,7 +11,7 @@ new Function('require', 'exports', compiled)(id => {
   assert.equal(id, 'expo-audio');
   return { setAudioModeAsync: async mode => configured.push(mode) };
 }, moduleExports);
-const { PassageAudioQueue, configureReadingAudio } = moduleExports;
+const { PassageAudioQueue, configureReadingAudio, shouldPlayReadingMusic } = moduleExports;
 
 class TestPlaylist {
   items = [];
@@ -29,6 +29,18 @@ class TestPlaylist {
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 async function main() {
+  const musicCases = [
+    { name: 'foreground reader with music alone or an in-app narration pause', readerOpen: true, appActive: true, backgroundNarrationActive: false, remotePaused: false, plays: true },
+    { name: 'locked or switched away without active opted-in narration', readerOpen: true, appActive: false, backgroundNarrationActive: false, remotePaused: false, plays: false },
+    { name: 'locked or switched away with active opted-in narration', readerOpen: true, appActive: false, backgroundNarrationActive: true, remotePaused: false, plays: true },
+    { name: 'lock-screen pause', readerOpen: true, appActive: false, backgroundNarrationActive: false, remotePaused: true, plays: false },
+    { name: 'return to the app after a lock-screen pause', readerOpen: true, appActive: true, backgroundNarrationActive: false, remotePaused: true, plays: false },
+    { name: 'navigate away from the reader', readerOpen: false, appActive: true, backgroundNarrationActive: true, remotePaused: false, plays: false },
+  ];
+  for (const { name, readerOpen, appActive, backgroundNarrationActive, remotePaused, plays } of musicCases) {
+    assert.equal(shouldPlayReadingMusic(readerOpen, appActive, backgroundNarrationActive, remotePaused), plays, name);
+  }
+
   await Promise.all([configureReadingAudio(true), configureReadingAudio(true), configureReadingAudio(false)]);
   assert.deepEqual(configured.map(mode => [mode.shouldPlayInBackground, mode.interruptionMode]), [
     [true, 'doNotMix'], [false, 'mixWithOthers'],
@@ -43,7 +55,7 @@ async function main() {
   });
   const queue = new PassageAudioQueue({
     player, start: 8, count: 20, generate,
-    beforePlay: async () => {},
+    beforePlay: async () => true,
     onPosition: position => visited.push(position),
     onFinish: () => finished++,
     onError: error => { throw error; },
@@ -74,13 +86,26 @@ async function main() {
   queue.dispose();
   assert.equal(player.items.length, 0);
 
+  const blockedPlayer = new TestPlaylist();
+  const blockedQueue = new PassageAudioQueue({
+    player: blockedPlayer, start: 0, count: 2, generate,
+    beforePlay: async () => false,
+    onPosition: () => { throw new Error('Blocked narration changed position'); },
+    onFinish: () => { throw new Error('Blocked narration finished a passage'); },
+    onError: error => { throw error; },
+  });
+  await blockedQueue.start();
+  assert.equal(blockedQueue.hasStarted, false);
+  assert.equal(blockedPlayer.playing, false);
+  blockedQueue.dispose();
+
   const waitingPlayer = new TestPlaylist();
   let releaseNext;
   let nextDisposed = false;
   const waitingQueue = new PassageAudioQueue({
     player: waitingPlayer, start: 0, count: 2,
     generate: position => position === 0 ? generate(0) : new Promise(resolve => { releaseNext = resolve; }),
-    beforePlay: async () => {},
+    beforePlay: async () => true,
     onPosition: position => visited.push(position),
     onFinish: () => { throw new Error('Queue ended before the next passage loaded'); },
     onError: error => { throw error; },

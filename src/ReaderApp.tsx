@@ -33,7 +33,7 @@ import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
 import { speechEngines, defaultSpeechEngineId } from './speech';
 import type { SpeechEngine } from './speech/engine';
-import { configureReadingAudio, setReadingMusicVolume, PassageAudioQueue } from './readingAudioSession';
+import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
 import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
 import { isParadeeInstalled } from './speech/paradee/storage';
 import { dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
@@ -183,10 +183,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const [autoScrollSeconds, setAutoScrollSeconds] = useState(15);
   const [readAloud, setReadAloud] = useState(false);
   const readAloudRef = useRef(false);
-  const [backgroundReadingAudio, setBackgroundReadingAudio] = useState(true);
+  const [backgroundReadingAudio, setBackgroundReadingAudio] = useState(false);
   const [narrationOwnsControls, setNarrationOwnsControls] = useState(false);
   const [remoteReadingPaused, setRemoteReadingPaused] = useState(false);
-  const [remoteMusicPaused, setRemoteMusicPaused] = useState(false);
 
   const currentIndex = useRef(0);
   const [touchingReader, setTouchingReader] = useState(false);
@@ -229,7 +228,10 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const musicQueue = useMemo(() => musicOrder.filter(id => downloadedMusic[id]),[musicOrder,downloadedMusic]);
   const playableMusic = useMemo(() => musicQueue.filter(id => !musicExcluded.includes(id)),[musicQueue,musicExcluded]);
   const [appActive, setAppActive] = useState(AppState.currentState == null || AppState.currentState === 'active');
-  const nativeBackgroundAudio = Platform.OS !== 'web' && backgroundReadingAudio;
+  const backgroundPlaybackAvailable = Platform.OS !== 'web' &&
+    typeof narrationPlayer.setRemotePlaybackCompanion === 'function' &&
+    typeof narrationPlayer.resetRemoteTransport === 'function';
+  const nativeBackgroundAudio = backgroundPlaybackAvailable && backgroundReadingAudio;
   const readingAudioAllowed = appActive || nativeBackgroundAudio;
   const readingOpen = screen === 'read' && pathname === '/reader';
   const musicEntries = useMemo(() => playableMusic.flatMap(id => {
@@ -246,8 +248,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const musicStatus = reportedMusicStatus.id === musicPlayer.id ? reportedMusicStatus : musicPlayer.currentStatus;
   const [musicError, setMusicError] = useState(false);
   const [musicAttempt, setMusicAttempt] = useState(0);
-  const musicPaused = remoteReadingPaused || remoteMusicPaused;
-  const waitingForMusic = ready && musicEnabled && appActive && readingOpen && !musicPaused && !musicStatus.isLoaded && !musicError;
+  const musicCanFollowNarration = nativeBackgroundAudio && narrationOwnsControls;
+  const musicAllowed = shouldPlayReadingMusic(readingOpen, appActive, musicCanFollowNarration && readAloud, remoteReadingPaused);
+  const waitingForMusic = ready && musicEnabled && appActive && musicAllowed && !!musicEntries.length && !musicStatus.isLoaded && !musicError;
   const musicFailed = musicError;
 
   useEffect(() => {
@@ -275,10 +278,10 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   }, []);
 
   useEffect(() => {
-    if (Platform.OS === 'web') return;
-    narrationPlayer.setRemotePlaybackCompanion(musicEnabled && readingOpen ? musicPlayer : null);
+    if (!nativeBackgroundAudio) return;
+    narrationPlayer.setRemotePlaybackCompanion(musicEnabled && readingOpen && musicEntries.length && !musicError ? musicPlayer : null);
     return () => narrationPlayer.setRemotePlaybackCompanion(null);
-  }, [narrationPlayer, musicPlayer, musicEnabled, readingOpen]);
+  }, [narrationPlayer, musicPlayer, musicEnabled, nativeBackgroundAudio, readingOpen, musicEntries.length, musicError]);
 
   useEffect(() => {
     setReadingMusicVolume(musicPlayer, narrating ? musicVolume * 0.5 : musicVolume);
@@ -291,7 +294,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
-    const remote = musicPlayer.addListener('remotePlaybackUpdate', ({ playing }) => setRemoteMusicPaused(!playing));
     const status = musicPlayer.addListener('playlistStatusUpdate', event => {
       if ('error' in event && event.error) setMusicError(true);
     });
@@ -299,17 +301,25 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       const entry = musicEntries[musicPlayer.currentIndex];
       if (readingOpen && entry) setCurrentMusic(entry.track.id);
     });
-    return () => { remote.remove(); status.remove(); tracks.remove(); };
+    return () => { status.remove(); tracks.remove(); };
   }, [musicPlayer, musicEntries, readingOpen]);
 
   useEffect(() => {
-    if (!ready || !musicEnabled || !readingOpen || !readingAudioAllowed || !musicEntries.length || musicFailed) {
+    if (!ready || !musicEnabled || !musicAllowed || !musicEntries.length || musicFailed) {
       musicPlayer.pause();
       return;
     }
     let cancelled = false;
-    void configureReadingAudio(nativeBackgroundAudio).then(() => {
-      if (cancelled || musicPaused || (Platform.OS !== 'web' && narrationPlayer.remoteTransportPaused)) return;
+    // Let narration finish configuring the shared session when it is starting or owns the lock screen.
+    const narrationManagesAudio = musicCanFollowNarration || (nativeBackgroundAudio && readAloudRef.current);
+    const audioReady = narrationManagesAudio ? Promise.resolve() : configureReadingAudio(false);
+    void audioReady.then(() => {
+      if (cancelled) return;
+      const state = AppState.currentState;
+      if (!shouldPlayReadingMusic(
+        readingOpen, state == null || state === 'active', musicCanFollowNarration && readAloudRef.current,
+        narrationPlayer.remoteTransportPaused === true,
+      )) return;
       if (!musicPlayer.playing) musicPlayer.play();
     }).catch(error => {
       if (!cancelled) {
@@ -318,24 +328,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       }
     });
     return () => { cancelled = true; };
-  }, [musicPlayer, narrationPlayer, ready, musicEnabled, readingAudioAllowed, readingOpen, nativeBackgroundAudio, musicEntries.length, musicPaused, musicFailed, musicAttempt]);
-
-  useEffect(() => {
-    if (!nativeBackgroundAudio || !ready || !readingOpen || !musicEnabled || !musicEntries.length || narrationOwnsControls || musicFailed) return;
-    let cancelled = false;
-    const metadata = () => ({ title: musicEntries[musicPlayer.currentIndex]?.track.title ?? 'DivineCanvas', artist: 'DivineCanvas' });
-    void configureReadingAudio(true).then(() => {
-      if (!cancelled && narrationPlayer.trackCount === 0) {
-        musicPlayer.setActiveForLockScreen(true, metadata(), { showNextTrack: true, showPreviousTrack: true });
-      }
-    }).catch(error => console.warn('Unable to configure music controls:', error));
-    const tracks = musicPlayer.addListener('trackChanged', () => musicPlayer.updateLockScreenMetadata(metadata()));
-    return () => {
-      cancelled = true;
-      tracks.remove();
-      musicPlayer.clearLockScreenControls();
-    };
-  }, [musicPlayer, narrationPlayer, nativeBackgroundAudio, ready, readingOpen, musicEnabled, musicEntries, narrationOwnsControls, musicFailed]);
+  }, [musicPlayer, narrationPlayer, ready, musicEnabled, musicAllowed, readingOpen, musicCanFollowNarration, nativeBackgroundAudio, musicEntries.length, musicFailed, musicAttempt]);
 
   const [saved, setSaved] = useState<Saved>({});
   const [notes, setNotes] = useState<Record<string,string>>({});
@@ -481,7 +474,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
       const savedScrollSeconds = Number(values['auto-scroll-seconds']);
       if (Number.isInteger(savedScrollSeconds) && savedScrollSeconds >= 5 && savedScrollSeconds <= 60) setAutoScrollSeconds(savedScrollSeconds);
-      if (values['background-reading-audio'] === 'false') setBackgroundReadingAudio(false);
+      setBackgroundReadingAudio(values['background-reading-audio'] === 'true');
       if (values['music-enabled'] === 'false') setMusicEnabled(false);
       let savedOrder=MUSIC_TRACKS.map(track => track.id);
       try {savedOrder=normalizeMusicOrder(values['music-order'] ? JSON.parse(values['music-order']) : null,savedOrder);} catch { /* Use the default order. */ }
@@ -808,18 +801,21 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       setSelectedWord(null);
     } catch { Alert.alert(t("Could not copy text"), t("Please try again.")); }
   }
+  const clearNarrationControls = useCallback(() => {
+    narrationPlayer.clearLockScreenControls();
+    narrationPlayer.resetRemoteTransport?.();
+    setNarrationOwnsControls(false);
+    setRemoteReadingPaused(false);
+    void configureReadingAudio(false).catch(error => console.warn('Unable to restore foreground audio:', error));
+  }, [narrationPlayer, setNarrationOwnsControls, setRemoteReadingPaused]);
+
   const stopNarration = useCallback(() => {
     const session = narrationQueue.current;
     narrationQueue.current = null;
-    if (session) {
-      narrationPlayer.clearLockScreenControls();
-      narrationPlayer.resetRemoteTransport();
-      session.queue.dispose();
-    }
-    setNarrationOwnsControls(false);
-    setRemoteReadingPaused(false);
+    if (session?.background) clearNarrationControls();
+    session?.queue.dispose();
     setNarrating(false);
-  }, [narrationPlayer, setNarrationOwnsControls, setRemoteReadingPaused, setNarrating]);
+  }, [clearNarrationControls, setNarrating]);
 
   const stopReadAloud = useCallback(() => {
     readAloudRef.current = false;
@@ -841,16 +837,16 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         narrationQueue.current?.queue.finishTrack();
       }
     });
-    const remote = narrationPlayer.addListener('remotePlaybackUpdate', ({ playing }) => {
-      if (!narrationQueue.current) return;
+    const remote = backgroundPlaybackAvailable ? narrationPlayer.addListener('remotePlaybackUpdate', ({ playing }) => {
+      if (!narrationQueue.current?.background) return;
       narrationQueue.current.queue.setRemotePlaying(playing);
       readAloudRef.current = playing;
       setReadAloud(playing);
       setNarrating(playing);
       setRemoteReadingPaused(!playing);
-    });
-    return () => { positions.remove(); status.remove(); remote.remove(); };
-  }, [narrationPlayer, stopReadAloud]);
+    }) : undefined;
+    return () => { positions.remove(); status.remove(); remote?.remove(); };
+  }, [backgroundPlaybackAvailable, narrationPlayer, stopReadAloud]);
 
   const getSpeechEngine = useCallback(async () => {
     if (!speechEngine.current) speechEngine.current = await speechEngines.create(defaultSpeechEngineId);
@@ -931,11 +927,27 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     return { title: `${t(activeBook.title)} · ${reference}`, artist: 'DivineCanvas' };
   }, [passages, activeBookId, activeBook.title, t]);
 
+  const prepareNarrationPlayback = useCallback(async (queue: PassageAudioQueue, background: boolean) => {
+    if (narrationQueue.current?.queue !== queue || !readAloudRef.current) return false;
+    await configureReadingAudio(background);
+    if (narrationQueue.current?.queue !== queue || !readAloudRef.current) return false;
+    const state = AppState.currentState;
+    if (!background && state != null && state !== 'active') return false;
+    if (background) {
+      narrationPlayer.setActiveForLockScreen(true, narrationMetadata(currentIndex.current), {
+        showPreviousTrack: true,
+        showNextTrack: true,
+      });
+      setNarrationOwnsControls(true);
+    }
+    return true;
+  }, [narrationPlayer, narrationMetadata, setNarrationOwnsControls]);
+
   useEffect(() => {
     if (!narrationAllowed || !readAloud || !textReady || !voiceInstalled || !runtimeAvailable) return;
     const timer = setTimeout(() => {
       if (narrationQueue.current || !readAloudRef.current) return;
-      const queue = new PassageAudioQueue({
+      const queue: PassageAudioQueue = new PassageAudioQueue({
         player: narrationPlayer,
         start: index,
         count: passages.length,
@@ -956,16 +968,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           speechWork.current = task.catch(() => {});
           return task;
         },
-        beforePlay: async () => {
-          await configureReadingAudio(nativeBackgroundAudio);
-          if (narrationQueue.current?.queue !== queue || !nativeBackgroundAudio) return;
-          musicPlayer.clearLockScreenControls();
-          narrationPlayer.setActiveForLockScreen(true, narrationMetadata(currentIndex.current), {
-            showPreviousTrack: true,
-            showNextTrack: true,
-          });
-          setNarrationOwnsControls(true);
-        },
+        beforePlay: () => prepareNarrationPlayback(queue, nativeBackgroundAudio),
         onPosition: position => {
           // Save even if the reader view is unavailable while the phone is locked.
           rememberPosition(position);
@@ -983,7 +986,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       void queue.start();
     }, 0);
     return () => clearTimeout(timer);
-  }, [narrationAllowed, readAloud, textReady, voiceInstalled, runtimeAvailable, index, passages.length, activeBookId, language, narrationPlayer, getSpeechEngine, getTextDb, nativeBackgroundAudio, musicPlayer, narrationMetadata, rememberPosition, stopReadAloud, t]);
+  }, [narrationAllowed, readAloud, textReady, voiceInstalled, runtimeAvailable, index, passages.length, activeBookId, language, narrationPlayer, getSpeechEngine, getTextDb, nativeBackgroundAudio, prepareNarrationPlayback, rememberPosition, stopReadAloud, t]);
 
   useEffect(() => {
     if (!narrationOwnsControls || !nativeBackgroundAudio) return;
@@ -1012,21 +1015,30 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       setAutoScrollEnabled(false);
       savePreference('auto-scroll-enabled', 'false');
     }
-    if (narrationQueue.current && narrationQueue.current.queue.position === index) {
-      narrationPlayer.resetRemoteTransport();
-      setRemoteReadingPaused(false);
-      narrationQueue.current.queue.resume();
-      setNarrating(true);
-    }
     readAloudRef.current = true;
     setReadAloud(true);
+    const session = narrationQueue.current;
+    if (session?.queue.position === index) {
+      narrationPlayer.resetRemoteTransport?.();
+      setRemoteReadingPaused(false);
+      void prepareNarrationPlayback(session.queue, session.background).then(canPlay => {
+        if (!canPlay || !readAloudRef.current) return;
+        session.queue.resume();
+        setNarrating(true);
+      }).catch(error => {
+        if (narrationQueue.current !== session) return;
+        stopReadAloud();
+        console.warn('Could not resume read-aloud:', error);
+      });
+    }
   }
 
   function pauseReadAloud() {
     readAloudRef.current = false;
-    const queue = narrationQueue.current?.queue;
-    if (queue?.hasStarted) {
-      queue.pause();
+    const session = narrationQueue.current;
+    if (session?.queue.hasStarted) {
+      session.queue.pause();
+      if (session.background) clearNarrationControls();
       setNarrating(false);
     } else {
       stopNarration();
@@ -1073,7 +1085,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   function openBook(book: Book, justDownloaded = false, startReading = false) {
     if (!justDownloaded && !installedBooks[book.id]) {void installBook(book, startReading); return;}
     stopReadAloud();
-    setRemoteMusicPaused(false);
     const resume = book.passages.findIndex(p => p.id === lastByBook[book.id]);
     const next = Math.max(0, resume);
     currentIndex.current = next;
@@ -1253,11 +1264,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Use the play button to pause or resume.")}</Text></View>
             <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
-          {Platform.OS !== 'web' && <View style={styles.settingsListRow}>
+          {backgroundPlaybackAvailable && <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}>
-              <Text style={styles.settingsMenuTitle}>{appLanguage === 'hi' ? 'लॉक होने पर ऑडियो जारी रखें' : 'Continue audio when locked'}</Text>
+              <Text style={styles.settingsMenuTitle}>{t("Background read-aloud")}</Text>
+              <Text style={styles.settingsMenuDescription}>{t("Keep read-aloud and its accompanying music playing when you lock your device or switch apps.")}</Text>
             </View>
-            <Switch accessibilityLabel={appLanguage === 'hi' ? 'लॉक होने पर ऑडियो जारी रखें' : 'Continue audio when locked'} value={backgroundReadingAudio} onValueChange={value => {
+            <Switch accessibilityLabel={t("Background read-aloud")} value={backgroundReadingAudio} onValueChange={value => {
               setBackgroundReadingAudio(value);
               savePreference('background-reading-audio', String(value));
             }} trackColor={{true: colors.accent}} />
@@ -1279,7 +1291,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
-            <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); setRemoteMusicPaused(false); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
+            <Switch accessibilityLabel={t("Reading music")} value={musicEnabled} onValueChange={value => {setMusicEnabled(value); void setting('music-enabled', String(value));}} trackColor={{true: colors.accent}} />
           </View>
           <View style={{paddingVertical: 18}}>
             <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>{t("Music volume")}</Text><Text style={styles.settingsMenuDescription}>{Math.round(musicVolume * 100)}%</Text></View>
@@ -1415,7 +1427,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const readerHeaderLeft = <Pressable accessibilityRole="button" accessibilityLabel={t("Chapters")} onPress={() => router.push('/chapters')} style={styles.profileButton}>
           <SymbolView name={{ios:'list.bullet',android:'list',web:'list'}} tintColor={colors.ink} size={23}/>
         </Pressable>;
-  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); setRemoteMusicPaused(false); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
+  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={() => {if (musicFailed && musicEnabled) {retryMusic(); return;} const next = !musicEnabled; setMusicEnabled(next); if (!next) setMusicError(false); void setting('music-enabled', String(next));}} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage === 'hi' ? 'पाठ की भाषा बदलें। वर्तमान:' : 'Switch reading language. Current:'} ${language === 'en' ? t("English") : language === 'hi' ? t("Hindi") : t("Sanskrit")}`} onPress={() => { activeSelection.current = null; setSelectedWord(null); previousWordTap.current = null; const next = activeBook.languages[(activeBook.languages.indexOf(language) + 1) % activeBook.languages.length]; setLanguage(next); void setting('language', next); }} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? t("English ▾") : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
         {Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => setReaderMenuOpen(true)} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable> : <MenuView
           title={t(activeBook.title)} style={styles.profileButton}

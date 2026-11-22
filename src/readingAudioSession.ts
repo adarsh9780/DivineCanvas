@@ -19,6 +19,15 @@ export function configureReadingAudio(background: boolean): Promise<void> {
   return operation;
 }
 
+export function shouldPlayReadingMusic(
+  readerOpen: boolean,
+  appActive: boolean,
+  backgroundNarrationActive: boolean,
+  pausedFromLockScreen: boolean,
+): boolean {
+  return readerOpen && (appActive || backgroundNarrationActive) && !pausedFromLockScreen;
+}
+
 export function setReadingMusicVolume(player: AudioPlaylist, volume: number) {
   player.volume = volume;
 }
@@ -28,7 +37,7 @@ type PassageQueueOptions = {
   start: number;
   count: number;
   generate: (position: number, signal: AbortSignal) => Promise<GeneratedSpeech>;
-  beforePlay: () => Promise<void>;
+  beforePlay: () => Promise<boolean>;
   onPosition: (position: number) => void;
   onFinish: () => void;
   onError: (error: unknown) => void;
@@ -65,8 +74,8 @@ export class PassageAudioQueue {
       if (this.first !== this.position) await this.append(this.position);
       if (this.stopped) return;
       if (this.first !== this.position) this.player.skipTo(this.position - this.first);
-      await this.options.beforePlay();
-      if (this.stopped) return;
+      const canPlay = await this.options.beforePlay();
+      if (!canPlay || this.stopped) return;
       this.started = true;
       if (this.wantsPlayback) this.player.play();
       void this.fill();

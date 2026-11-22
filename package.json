@@ -60,6 +60,11 @@
   "private": true,
   "expo": {
     "autolinking": {
+      "android": {
+        "buildFromSource": [
+          "expo-audio"
+        ]
+      },
       "ios": {
         "buildFromSource": [
           ".*"
