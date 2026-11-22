@@ -56,7 +56,47 @@ npx expo run:ios --configuration Release --device
 
 ---
 
-## 2. Cloud Builds via EAS (Expo Application Services)
+## 2. iPadOS Build & Testing (Universal App)
+
+In `app.json`, `"supportsTablet": true` is enabled, and Xcode builds DivineCanvas as a universal app (`TARGETED_DEVICE_FAMILY = "1,2"`). The standard Release binary (`generic/platform=iOS`) natively supports both iPhone and iPad.
+
+### A. Run on a Connected Physical iPad
+Expo will prompt you to select your iPad (or you can pass its name directly):
+```bash
+# Prompt device selector:
+npx expo run:ios --device
+
+# Or target directly:
+npx expo run:ios --device "Your iPad Name"
+```
+
+### B. Install Pre-built App on Connected iPad
+If you already built the Release bundle with `xcodebuild`:
+```bash
+xcrun devicectl device install app --device "Your iPad Name" /tmp/divinecanvas-build/Build/Products/Release-iphoneos/DivineCanvas.app
+```
+*(Or drag and drop `DivineCanvas.app` into your iPad under **Xcode > Window > Devices and Simulators**).*
+
+### C. Run on iPad Simulator
+```bash
+# Run on an iPad Simulator via Expo CLI:
+npx expo run:ios --device "iPad Pro 11-inch (M4)"
+# or:
+npx expo run:ios --device "iPad Air 11-inch (M2)"
+```
+
+### D. Direct Xcode CLI Build for iPad Simulator
+```bash
+xcodebuild -workspace ios/DivineCanvas.xcworkspace \
+  -scheme DivineCanvas \
+  -configuration Debug \
+  -destination 'platform=iOS Simulator,name=iPad Pro 11-inch (M4)' \
+  -derivedDataPath /tmp/divinecanvas-build build
+```
+
+---
+
+## 3. Cloud Builds via EAS (Expo Application Services)
 
 Per project conventions in `AGENTS.md` and `eas.json`, always run EAS CLI with `npx eas-cli@latest`.
 
@@ -90,7 +130,28 @@ npx eas-cli@latest build --platform ios --profile production
 
 ---
 
-## 3. Pre-Commit Verification & Sanity Checks
+## 4. Android APK via GitHub Actions
+
+Get approval for the specific build before dispatching the workflow. In GitHub, open
+**Actions → Android APK → Run workflow**, or run:
+
+```bash
+gh workflow run android-apk.yml --ref main
+```
+
+The workflow builds a standalone Android release APK for ARM64 with the generated
+Android test signing key. Download the **DivineCanvas-android-arm64** artifact
+from the completed run. GitHub keeps the artifact for seven days.
+
+To install the APK on a fresh Android emulator:
+
+```bash
+adb install app-release.apk
+```
+
+---
+
+## 5. Pre-Commit Verification & Sanity Checks
 
 Run verification checks before committing changes:
 ```bash
