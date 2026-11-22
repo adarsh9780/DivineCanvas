@@ -32,8 +32,15 @@ jobs:
       - name: Install Android SDK packages
         run: |
           sdk_manager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          "$sdk_manager" --licenses < <(yes) >/dev/null
-          "$sdk_manager" "platforms;android-37" "build-tools;37.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+          "$sdk_manager" --licenses < <(yes 2>/dev/null) >/dev/null
+          "$sdk_manager" "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+          # Expo SDK 58 declares compileSdk as 37, while Google's package uses the minor version in its path.
+          sdk_platforms="$ANDROID_HOME/platforms"
+          if [[ ! -e "$sdk_platforms/android-37" ]]; then
+            ln -s android-37.0 "$sdk_platforms/android-37"
+          fi
+          test -f "$sdk_platforms/android-37/android.jar"
 
       - name: Generate the Android project
         run: npm exec -- expo prebuild --platform android --no-install --clean
