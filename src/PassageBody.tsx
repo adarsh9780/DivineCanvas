@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ScrollView, Text, View, type TextLayoutEvent, type TextStyle, type StyleProp } from 'react-native';
 import { useAppLanguage } from './AppLanguage';
-import { measuredPassageSlices, type PassageSlice } from './passagePages';
+import { centeredPassageOffset, measuredPassageSlices, type PassageSlice } from './passagePages';
 
 type Props = {
   text:string;
   fontSize:number;
+  pageContentHeight:number;
   textStyle:StyleProp<TextStyle>;
   continuationColor:string;
   renderText:(text:string, start:number, size:number)=>React.ReactNode;
@@ -15,10 +16,11 @@ type Props = {
   onPartChange:()=>void;
 };
 /** A native text measurement keeps short entries whole and breaks long ones at rendered line boundaries. */
-export function PassageBody({text, fontSize, textStyle, continuationColor, renderText, renderTools, active, registerNavigation, onPartChange}:Props) {
+export function PassageBody({text, fontSize, pageContentHeight, textStyle, continuationColor, renderText, renderTools, active, registerNavigation, onPartChange}:Props) {
   const {appLanguage,t}=useAppLanguage();
   const [height,setHeight]=useState(0);
   const [size,setSize]=useState(fontSize);
+  const [textHeight,setTextHeight]=useState(0);
   const [slices,setSlices]=useState<PassageSlice[] | null>(null);
   const [fallbackOverflow,setFallbackOverflow]=useState(false);
   const scroll=useRef<React.ComponentRef<typeof ScrollView>>(null);
@@ -46,13 +48,15 @@ export function PassageBody({text, fontSize, textStyle, continuationColor, rende
       setSize(Math.max(minimum, Math.min(size-1,Math.floor(size*available/total))));
       return;
     }
+    setTextHeight(total);
     const measured=measuredPassageSlices(text,lines,available);
     if (!measured && total > available) setFallbackOverflow(true);
     setSlices(measured ?? [{start:0,end:text.length}]);
   },[height,slices,fontSize,size,text]);
+  const centerOffset=slices?.length===1 && !fallbackOverflow ? centeredPassageOffset(pageContentHeight,height,textHeight) : 0;
   return <View style={{flex:1}} onLayout={event=>setHeight(event.nativeEvent.layout.height)}>
     {!!height && !!text && !slices && <Text accessible={false} pointerEvents="none" onTextLayout={measure} style={[textStyle,{position:'absolute',opacity:0,width:'100%',fontSize:size,lineHeight:Math.round(size*1.5)}]}>{text}</Text>}
-    {!!slices && <ScrollView ref={scroll} style={{flex:1}} nestedScrollEnabled pagingEnabled={slices.length>1} showsVerticalScrollIndicator={slices.length===1} onMomentumScrollEnd={event => {
+    {!!slices && <ScrollView ref={scroll} style={{flex:1,transform:[{translateY:centerOffset}]}} nestedScrollEnabled pagingEnabled={slices.length>1} showsVerticalScrollIndicator={slices.length===1} onMomentumScrollEnd={event => {
       const next=Math.min(slices.length-1,Math.max(0,Math.round(event.nativeEvent.contentOffset.y/height)));
       if (next !== part.current) {part.current=next; onPartChange();}
     }}>

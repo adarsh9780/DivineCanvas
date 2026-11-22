@@ -20,3 +20,11 @@ export function measuredPassageSlices(text:string, lines:MeasuredLine[], height:
   parts.push({start:starts[first],end:text.length});
   return parts;
 }
+
+/** Shift a short passage toward the reader center while keeping space for its controls. */
+export function centeredPassageOffset(pageHeight:number, bodyHeight:number, textHeight:number):number {
+  if (pageHeight <= 0 || bodyHeight <= 0 || textHeight <= 0) return 0;
+  const desired = Math.max(0, (pageHeight - bodyHeight) / 2);
+  const available = Math.max(0, (bodyHeight - textHeight - 64) / 2);
+  return Math.min(desired, available);
+}
