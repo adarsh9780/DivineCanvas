@@ -132,22 +132,79 @@ npx eas-cli@latest build --platform ios --profile production
 
 ## 4. Android APK via GitHub Actions
 
-Get approval for the specific build before dispatching the workflow. In GitHub, open
-**Actions → Android APK → Run workflow**, or run:
+Run these commands in Terminal from the project directory:
+
+```bash
+cd ~/Downloads/Projects/DivineCanvas
+```
+
+The GitHub CLI (`gh`) must be installed and signed in to an account with access to the repository. Check your login with `gh auth status`, or sign in with `gh auth login`.
+
+### A. Start an ARM64 APK build
+
+Push the changes you want to build to `main` first. The workflow builds the committed code on GitHub, not uncommitted files on your Mac. Check and push with:
+
+```bash
+git status
+git push origin main
+```
+
+Start the workflow from the latest commit on `main`:
 
 ```bash
 gh workflow run android-apk.yml --ref main
 ```
 
-The workflow builds a standalone Android release APK for ARM64 with the generated
-Android test signing key. Download the **DivineCanvas-android-arm64** artifact
-from the completed run. GitHub keeps the artifact for seven days.
+The command returns a link to the run. You can also open **GitHub → Actions → Android APK → Run workflow**, choose `main`, and select **Run workflow**. Each run uses GitHub Actions minutes. EAS cloud builds have a separate quota.
 
-To install the APK on a fresh Android emulator:
+### B. Check the status and result
+
+List recent Android APK runs and find the run ID in the output:
 
 ```bash
-adb install app-release.apk
+gh run list --workflow android-apk.yml --limit 5
 ```
+
+Replace `RUN_ID` in these commands with that number. View the run's status and job details:
+
+```bash
+gh run view RUN_ID
+```
+
+Open the run in your browser, where the individual steps and artifact are visible:
+
+```bash
+gh run view RUN_ID --web
+```
+
+After a failure, show the failed step logs:
+
+```bash
+gh run view RUN_ID --log-failed
+```
+
+### C. Download and install the APK
+
+Once the run succeeds, download and extract its artifact into a local folder:
+
+```bash
+gh run download RUN_ID --name DivineCanvas-android-arm64 --dir ./downloaded-apk
+```
+
+GitHub retains the artifact for seven days. Install the APK on a running emulator or connected, authorized Android phone:
+
+```bash
+adb devices
+adb install -r ./downloaded-apk/app-release.apk
+```
+
+If `adb` is not in your PATH, use the full path to `adb` in your Android SDK's `platform-tools` directory. The APK supports ARM64 devices and ARM64 emulators. The workflow is configured to sign with the EAS key stored in GitHub Actions secrets. Android accepts an update when its application ID and signing certificate match the installed app and its version code is equal or higher. A previously installed debug-signed APK may need to be uninstalled first. Uninstalling removes that app's local data.
+
+### D. Signing and version codes
+
+The workflow requires the GitHub Actions secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Keep the keystore and passwords private and out of the repository. The workflow assigns version codes from `100000 +` the GitHub Actions run number. Coordinate future EAS or Play Store version codes with this sequence so updates can be installed in the intended order.
+
+When an AI assistant is operating this project, `AGENTS.md` requires your explicit approval for each build, including retries.
 
 ---
 
