@@ -14,7 +14,7 @@ export const PARADEE_INFO: SpeechEngineInfo = {id:'paradee',name:'Paradee',versi
   {id:'hf_alpha',name:'Hindi · female',languages:['hi','sa']}, {id:'hm_omega',name:'Hindi · male',languages:['hi','sa']},
 ]};
 function checkAbort(signal?: AbortSignal) { if (signal?.aborted) throw new Error('Speech cancelled.'); }
-function wav(samples:Float32Array):Uint8Array {
+export function wav(samples:Float32Array):Uint8Array {
   const bytes = new Uint8Array(44 + samples.length * 2); const v = new DataView(bytes.buffer);
   const str = (offset:number, text:string) => { for (let i=0;i<text.length;i++) v.setUint8(offset+i,text.charCodeAt(i)); };
   str(0,'RIFF'); v.setUint32(4,36+samples.length*2,true); str(8,'WAVE'); str(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,24000,true); v.setUint32(28,48000,true); v.setUint16(32,2,true); v.setUint16(34,16,true); str(36,'data'); v.setUint32(40,samples.length*2,true);

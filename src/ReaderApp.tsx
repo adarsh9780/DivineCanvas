@@ -31,6 +31,7 @@ import { moveAvailableMusic, musicDropTarget, normalizeMusicOrder, shuffleSelect
 import { MusicReorderRow } from './MusicReorderRow';
 import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
+import { VoiceComparison } from './VoiceComparison';
 import { speechEngines, defaultSpeechEngineId } from './speech';
 import type { SpeechEngine } from './speech/engine';
 import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
@@ -1305,6 +1306,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Paradee voice is available offline.") : t("Download an offline voice (about 11 MB).")}</Text></View>
             {voiceDownload !== null ? <Pressable accessibilityRole="button" accessibilityLabel={t("Cancel voice download")} onPress={cancelVoiceDownload}><Text style={{color:colors.accent}}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={voiceInstalled ? t("Remove reading voice") : t("Download reading voice")} onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={{color:colors.accent,fontWeight:'600'}}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
           </View>
+          {Platform.OS==='ios' && runtimeAvailable && <VoiceComparison colors={colors}/>}
           {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{t("Move to the next passage after a chosen time.")}</Text></View>
