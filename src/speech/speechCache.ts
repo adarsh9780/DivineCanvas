@@ -79,7 +79,7 @@ function deferGeneratedDisposal(file:GeneratedSpeech):GeneratedSpeech {
   return {uri:file.uri,dispose:async()=>{if (!released) {released=true; setTimeout(() => {void file.dispose().catch(() => {});}, RELEASE_GRACE_MS);}}};
 }
 export async function cachedSpeech(engine:SpeechEngine,request:SpeechRequest,signal:AbortSignal):Promise<GeneratedSpeech> {
-  const key=JSON.stringify([engine.info.id,engine.info.version,request.language,request.voiceId,request.rate ?? 1,request.text]);
+  const key=JSON.stringify([engine.info.id,engine.info.version,request.language,request.voiceId,request.rate ?? 1,request.expressiveness ?? null,request.text]);
   const name=nameFor(key), dir=directory();
   try {dir.create({idempotent:true,intermediates:true});} catch {return deferGeneratedDisposal(await engine.synthesize(request,signal));}
   const {audio,meta}=files(name);

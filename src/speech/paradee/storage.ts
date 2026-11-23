@@ -37,7 +37,7 @@ export async function installParadee(options: {signal?: AbortSignal; onProgress?
       options.onProgress?.({completedBytes, totalBytes:PARADEE_DOWNLOAD_BYTES});
     }
     if (options.signal?.aborted) throw new Error('Download cancelled.');
-    new File(staging, 'verified.json').write(JSON.stringify({version:'1.3', sourceRevision:'b569f5efb789af5ba643a44af348427242ceb784'}));
+    await new File(staging, 'verified.json').write(JSON.stringify({version:'1.3', sourceRevision:'b569f5efb789af5ba643a44af348427242ceb784'}));
     const final = destination();
     if (final.exists) final.delete();
     await staging.move(final);

@@ -15,11 +15,13 @@ export const voiceLabAssets:Record<VoiceLabPack,readonly Asset[]> = {
     {name:'model.onnx',url:`${kokoroBase}/onnx/model_quantized.onnx`,size:92361116,sha256:'fbae9257e1e05ffc727e951ef9b9c98418e6d79f1c9b6b13bd59f5c9028a1478'},
     {name:'english.bin',url:`${kokoroBase}/voices/af_heart.bin`,size:522240,sha256:'d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b'},
     {name:'hindi.bin',url:`${kokoroBase}/voices/hf_alpha.bin`,size:522240,sha256:'040be6a4425411cc01fda5fd06693c76bfa78572632852bc8cda9c99232ffb56'},
+    {name:'english-male.bin',url:`${kokoroBase}/voices/am_puck.bin`,size:522240,sha256:'fcf73c989033e9233e0b98713eca600c8c74dcc1614b37009d5450ff4a2274a0'},
+    {name:'hindi-male.bin',url:`${kokoroBase}/voices/hm_omega.bin`,size:522240,sha256:'b02d9222d9ed00ce26b302173a862c2c93f96cc40b5c422b8d14910b9ff34137'},
   ],
-  ninada:[{name:'model.onnx',url:`${ninadaBase}/onnx/sa.onnx`,size:29288386,sha256:'4e5b9aa10c53fb76959dbec03fb1dc014cc704435f8dffabf7a923056abcd1b6'}],
+  ninada:[{name:'model.onnx',url:`${ninadaBase}/onnx/sa.onnx`,size:29288386,sha256:'4e5b9aa10c53fb76959dbec03fb1dc014cc704435f8dffabf7a923056abcd1b6'}, {name:'female.onnx',url:`${ninadaBase}/onnx/sa_female.onnx`,size:29288386,sha256:'580f7c776cddbbb5721817bee201835fe9b2d3328cc0e078a59c07bf66b7e898'}],
 };
 const root=()=>new Directory(Paths.document,'voice-comparison');
-const packDir=(pack:VoiceLabPack)=>new Directory(root(),pack);
+export const packDir=(pack:VoiceLabPack)=>new Directory(root(),pack);
 export const voiceLabBytes=(pack:VoiceLabPack)=>voiceLabAssets[pack].reduce((n,a)=>n+a.size,0);
 export function voiceLabInstalled(pack:VoiceLabPack) {const dir=packDir(pack);return dir.exists && new File(dir,'verified.json').exists && voiceLabAssets[pack].every(a=>new File(dir,a.name).exists);}
 export async function downloadVoiceLab(pack:VoiceLabPack,signal:AbortSignal,onProgress:(n:number)=>void) {
@@ -27,8 +29,11 @@ export async function downloadVoiceLab(pack:VoiceLabPack,signal:AbortSignal,onPr
   try {
     root().create({idempotent:true,intermediates:true});staging.create({intermediates:true});let done=0;
     for (const asset of voiceLabAssets[pack]) {
-      const task=File.createDownloadTask(asset.url,new File(staging,asset.name),{signal,onProgress:({bytesWritten})=>onProgress((done+bytesWritten)/voiceLabBytes(pack))});
-      const file=await task.downloadAsync();
+      const existing=new File(packDir(pack),asset.name);
+      const fileInStage=new File(staging,asset.name);
+      let file:File|undefined;
+      if (existing.exists && existing.size===asset.size && await existing.digest('SHA-256')===asset.sha256) {await existing.copy(fileInStage);file=fileInStage;}
+      else {const task=File.createDownloadTask(asset.url,fileInStage,{signal,onProgress:({bytesWritten})=>onProgress((done+bytesWritten)/voiceLabBytes(pack))});file=await task.downloadAsync() ?? undefined;}
       if (!file || signal.aborted) throw new Error('Download cancelled.');
       if (file.size!==asset.size || await file.digest('SHA-256')!==asset.sha256) throw new Error('Download verification failed.');
       done+=asset.size;onProgress(done/voiceLabBytes(pack));

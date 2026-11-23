@@ -5,7 +5,7 @@ export type SpeechLanguage = 'en' | 'hi' | 'sa';
 export type SpeechVoice = { id: string; name: string; languages: readonly SpeechLanguage[] };
 export type SpeechEngineInfo = { id: string; name: string; version: string; voices: readonly SpeechVoice[] };
 export type SpeechDownloadProgress = { completedBytes: number; totalBytes?: number };
-export type SpeechRequest = { text: string; language: SpeechLanguage; voiceId: string; rate?: number };
+export type SpeechRequest = { text: string; language: SpeechLanguage; voiceId: string; rate?: number; expressiveness?: number };
 
 /** A generated file remains owned by the engine until dispose is called. */
 export type GeneratedSpeech = { uri: string; dispose(): Promise<void> };

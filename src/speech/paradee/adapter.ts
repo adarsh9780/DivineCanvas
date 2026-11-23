@@ -24,7 +24,7 @@ export function wav(samples:Float32Array):Uint8Array {
 
 /** Prototype phonemizer. The learned fallback uses the same vocabulary as upstream;
  * English text normalization is simplified and may pronounce names differently. */
-class ParadeeEngine implements SpeechEngine {
+export class ParadeeEngine implements SpeechEngine {
   readonly info = PARADEE_INFO;
   private ort?: Ort;
   private phonemeSession?: InferenceSession;
@@ -74,6 +74,10 @@ class ParadeeEngine implements SpeechEngine {
       results.push(result);
     }
     return results.join('').replace(/[।॥]/g,'.');
+  }
+  async preparePhonemes(text:string, language:'en'|'hi', signal?:AbortSignal) {
+    await this.load(); checkAbort(signal);
+    return {phonemes:await this.phonemize(text,language,signal),vocab:this.config!.vocab};
   }
   async synthesize(request:SpeechRequest, signal?:AbortSignal):Promise<GeneratedSpeech> {
     if (!this.info.voices.some(voice => voice.id===request.voiceId && voice.languages.includes(request.language))) throw new Error('This voice does not support that language.');

@@ -31,12 +31,11 @@ import { moveAvailableMusic, musicDropTarget, normalizeMusicOrder, shuffleSelect
 import { MusicReorderRow } from './MusicReorderRow';
 import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
-import { VoiceComparison } from './VoiceComparison';
-import { speechEngines, defaultSpeechEngineId } from './speech';
+import { VoiceModels } from './VoiceModels';
+import { createVoiceModel, defaultVoiceSelections, modelBytes, modelInstalled, modelVoices, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
 import type { SpeechEngine } from './speech/engine';
 import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
-import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
-import { isParadeeInstalled } from './speech/paradee/storage';
+import { voiceLabInstalled } from './speech/voiceLab';
 import { dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
 import { cachedSpeech, clearSpeechCache, pruneSpeechCache, speechCacheSize } from './speech/speechCache';
 import { isDoubleTap, selectedLookupWord, segmentPassage, selectionRange, type Tap, type TextSegment } from './lookupGesture';
@@ -49,6 +48,8 @@ import { books, GITA_BOOK_ID, type Book, type Passage, migrateLegacyPassageId } 
 import { CHAPTER_POSITION_PREFIX, chapterPositionPrefix, chapterPositionKey, bookPositionKey, chapterResumeIndex, chapterBounds, chapterReadingProgress, legacyGitaPositionCopies, SAVE_POSITION_SQL } from './readingProgress';
 
 import { backgrounds, backgroundLabels, palettes, fontSizes, parseAppearance, Background, ColorTheme, ReadingFontSize, Palette } from './readingAppearance';
+
+const ninadaNotice = 'MIT License\n\nCopyright (c) 2026 Hemanth HM <hemanth@h3manth.com> (https://h3manth.com)\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the "Software"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.';
 
 const lucideNotice = `ISC License
 
@@ -130,6 +131,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     } else router.push({pathname:'/settings/[page]',params:{page}});
   }
   const [showIconLicense, setShowIconLicense] = useState(false);
+  const [showNinadaLicense, setShowNinadaLicense] = useState(false);
   const [background, setBackground] = useState<Background>('images');
   const [colorTheme, setColorTheme] = useState<ColorTheme>('paper');
   const [imageSeed, setImageSeed] = useState(1);
@@ -207,15 +209,19 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const registerContinuation = useCallback((navigator:{advance:()=>boolean; hasMore:()=>boolean}|null) => {continuationNavigator.current=navigator; setContinuationPending(!!navigator?.hasMore());}, []);
   const onContinuationChange = useCallback(() => {setContinuationPending(!!continuationNavigator.current?.hasMore()); setInteractionCount(value => value+1);}, [setInteractionCount]);
   const speechEngine = useRef<SpeechEngine | null>(null);
+  const speechEngineId = useRef<VoiceModel | null>(null);
+  const [voiceSelections,setVoiceSelections]=useState<VoiceSelections>(defaultVoiceSelections);
+  const [modelRevision,setModelRevision]=useState(0);
+  const [downloadingModel,setDownloadingModel]=useState<VoiceModel|null>(null);
   const speechWork = useRef<Promise<unknown>>(Promise.resolve());
   const narrationQueue = useRef<{
     queue: PassageAudioQueue;
     bookId: string;
     background: boolean;
     language: 'en' | 'hi' | 'sa';
+    selectionKey:string;
   } | null>(null);
   const speechDownloadAbort = useRef<AbortController | null>(null);
-  const [voiceInstalled, setVoiceInstalled] = useState(() => Platform.OS !== 'web' && isParadeeInstalled());
   const [voiceDownload, setVoiceDownload] = useState<number | null>(null);
   const [pendingVoiceStart, setPendingVoiceStart] = useState<{bookId:string; passageId:string; language:'en'|'hi'|'sa'} | null>(null);
   const [dictionaryInstalled, setDictionaryInstalled] = useState(() => dictionaryAvailable());
@@ -398,6 +404,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   }, [screen, activeBookId, saved, notes, installedBooks, getTextDb]);
 
   const [language, setLanguage] = useState<'en' | 'hi' | 'sa'>('hi');
+  const voiceInstalled=Platform.OS!=='web' && modelRevision>=0 && modelInstalled(voiceSelections[language].model);
+  const voiceSelectionKey=JSON.stringify(voiceSelections[language]);
   const [positionsByBook, setPositionsByBook] = useState<Record<string, Record<number, string>>>({});
   const [lastByBook, setLastByBook] = useState<Record<string, string>>({});
   const chapterPositions = positionsByBook[activeBook.id] ?? EMPTY_CHAPTER_POSITIONS;
@@ -491,8 +499,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       const lang = await database.getFirstAsync<{value: string}>("SELECT value FROM settings WHERE key = 'language'");
       if (lang?.value === 'en' || lang?.value === 'hi' || lang?.value === 'sa') setLanguage(selectedBook.languages.includes(lang.value) ? lang.value : selectedBook.languages[0]);
       else if (!selectedBook.languages.includes('hi')) setLanguage(selectedBook.languages[0]);
-      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'music-order', 'music-excluded', 'music-current', 'background-reading-audio', 'auto-scroll-enabled', 'auto-scroll-seconds')");
+      const appearanceRows = await database.getAllAsync<{key: string; value: string}>("SELECT key, value FROM settings WHERE key IN ('background', 'font-size', 'gita-backgrounds', 'chapter-background-overrides', 'chapter-background-seeds', 'reader-walkthrough-seen', 'default-fullscreen', 'color-theme', 'image-tone', 'image-blur', 'music-enabled', 'music-volume', 'music-order', 'music-excluded', 'music-current', 'background-reading-audio', 'auto-scroll-enabled', 'auto-scroll-seconds', 'voice-selections')");
       const values = Object.fromEntries(appearanceRows.map(row => [row.key, row.value]));
+      setVoiceSelections(parseVoiceSelections(values['voice-selections']));
       setWalkthroughSeen(readerWalkthroughSeen(values[READER_WALKTHROUGH_KEY]));
       setDefaultImmersive(values['default-fullscreen'] === 'true');
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
@@ -873,32 +882,30 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     return () => { positions.remove(); status.remove(); remote?.remove(); };
   }, [backgroundPlaybackAvailable, narrationPlayer, stopReadAloud]);
 
-  const getSpeechEngine = useCallback(async () => {
-    if (!speechEngine.current) speechEngine.current = await speechEngines.create(defaultSpeechEngineId);
+  const getSpeechEngine = useCallback(async (model:VoiceModel = voiceSelections[language].model) => {
+    if (speechEngine.current && speechEngineId.current!==model) {await speechEngine.current.dispose();speechEngine.current=null;}
+    if (!speechEngine.current) {speechEngine.current=createVoiceModel(model);speechEngineId.current=model;}
     return speechEngine.current;
-  }, []);
-  const downloadVoice = useCallback(async () => {
-    if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
+  }, [language,voiceSelections]);
+  const downloadModel = useCallback(async (model:VoiceModel) => {
+    if (!runtimeAvailable) {Alert.alert(t("Development build needed"),t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
     if (speechDownloadAbort.current) return;
-    const controller = new AbortController(); speechDownloadAbort.current = controller; setVoiceDownload(0);
+    const controller=new AbortController();speechDownloadAbort.current=controller;setDownloadingModel(model);setVoiceDownload(0);
     try {
-      const engine = await getSpeechEngine();
-      await engine.install({signal:controller.signal,onProgress:progress=>setVoiceDownload(Math.min(1,progress.completedBytes/(progress.totalBytes ?? PARADEE_DOWNLOAD_BYTES)))});
-      if (!controller.signal.aborted) setVoiceInstalled(true);
-    } catch (error) {
-      setPendingVoiceStart(null);
-      if (!controller.signal.aborted) Alert.alert(t("Voice download failed"), error instanceof Error ? error.message : t("Please try again."));
-    } finally {speechDownloadAbort.current = null; setVoiceDownload(null);}
-  }, [getSpeechEngine, runtimeAvailable, t, setVoiceDownload, setVoiceInstalled, setPendingVoiceStart]);
-
-  const requestVoice = useCallback((passage: Passage) => {
+      stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);
+      await engine.install({signal:controller.signal,onProgress:p=>setVoiceDownload(Math.min(1,p.completedBytes/(p.totalBytes ?? modelBytes(model))))});
+      if(!controller.signal.aborted)setModelRevision(n=>n+1);
+    } catch(error) {setPendingVoiceStart(null);if(!controller.signal.aborted)Alert.alert(t("Voice download failed"),error instanceof Error?error.message:t("Please try again."));}
+    finally {speechDownloadAbort.current=null;setDownloadingModel(null);setVoiceDownload(null);}
+  },[runtimeAvailable,t,stopReadAloud,getSpeechEngine,setDownloadingModel,setVoiceDownload,setModelRevision,setPendingVoiceStart]);
+  const requestVoice = useCallback((passage: Passage, targetBookId:string = activeBookId, targetLanguage:'en'|'hi'|'sa' = language) => {
     if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("The offline voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
     if (speechDownloadAbort.current) {Alert.alert(t("Download in progress"), t("The reading voice is already downloading.")); return;}
-    Alert.alert(t("Download offline voice?"), t("Download the reading voice once (about 11 MB). It will work offline after installation."), [
+    Alert.alert(t("Download offline voice?"), `${voiceSelections[targetLanguage].model} · ${appLanguage==='hi'?'अधिकतम':'up to'} ${(modelBytes(voiceSelections[targetLanguage].model)/1000000).toFixed(1)} MB`, [
       {text:t("Not now"), style:'cancel'},
-      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:activeBookId, passageId:passage.id, language}); void downloadVoice();}},
+      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:targetBookId, passageId:passage.id, language:targetLanguage}); void downloadModel(voiceSelections[targetLanguage].model);}},
     ]);
-  }, [activeBookId, downloadVoice, language, runtimeAvailable, t, setPendingVoiceStart]);
+  }, [activeBookId, downloadModel, language, runtimeAvailable, t, setPendingVoiceStart, voiceSelections, appLanguage]);
 
   function cancelVoiceDownload() {setPendingVoiceStart(null); speechDownloadAbort.current?.abort();}
   function deleteDictionary() {
@@ -912,22 +919,32 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     catch { Alert.alert(t("Dictionary download failed"), appLanguage === 'hi' ? 'शब्दकोश डाउनलोड नहीं हो सका। इंटरनेट कनेक्शन जाँचें और कुछ देर बाद फिर प्रयास करें।' : 'The dictionary could not be downloaded. Check your internet connection and try again later.'); }
     finally { setDictionaryDownload(null); }
   }
-  async function removeVoice() {
-    try {stopReadAloud(); await speechWork.current; const engine=await getSpeechEngine(); await engine.uninstall(); setVoiceInstalled(false);}
-    catch (error) {Alert.alert(t("Could not remove voice"), error instanceof Error ? error.message : t("Please try again."));}
+  async function removeModel(model:VoiceModel) {
+    if(model==='paradee' && voiceLabInstalled('kokoro')) {Alert.alert(appLanguage==='hi'?'Kokoro के लिए Paradee आवश्यक है':'Paradee is needed by Kokoro',appLanguage==='hi'?'पहले Kokoro हटाएँ।':'Remove Kokoro first.');return;}
+    try {stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);await engine.uninstall();setModelRevision(n=>n+1);}
+    catch(error){Alert.alert(t("Could not remove voice"),error instanceof Error?error.message:t("Please try again."));}
+  }
+  function updateVoiceSelections(next:VoiceSelections) {stopReadAloud();setVoiceSelections(next);savePreference('voice-selections',JSON.stringify(next));}
+  async function previewVoice(model:VoiceModel,lang:'en'|'hi'|'sa',text:string) {
+    stopReadAloud();const task=speechWork.current.then(async()=>{const engine=await getSpeechEngine(model);const selected=voiceSelections[lang].model===model?voiceSelections[lang]:{model,voiceId:modelVoices[model][lang][0].id,rate:1,expressiveness:0.667};return engine.synthesize({text,language:lang,voiceId:selected.voiceId,rate:selected.rate,expressiveness:selected.expressiveness});});speechWork.current=task.catch(()=>{});return task;
   }
   const narrationAllowed = ready && readingOpen && readingAudioAllowed && !walkthroughVisible &&
     editing === null && dictionaryWord === null && sharingId === null;
+  useEffect(() => {
+    if (!ready || !readingOpen || !readAloud || !runtimeAvailable || voiceInstalled || voiceDownload!==null || !currentPassage) return;
+    const timer=setTimeout(()=>{stopReadAloud();requestVoice(currentPassage);},0);
+    return ()=>clearTimeout(timer);
+  }, [ready,readingOpen,readAloud,runtimeAvailable,voiceInstalled,voiceDownload,currentPassage,stopReadAloud,requestVoice]);
 
   useEffect(() => {
     const session = narrationQueue.current;
-    if (!session || (narrationAllowed && session.bookId === activeBookId && session.language === language && session.background === nativeBackgroundAudio &&
+    if (!session || (narrationAllowed && session.bookId === activeBookId && session.language === language && session.selectionKey === voiceSelectionKey && session.background === nativeBackgroundAudio &&
         session.queue.position === index)) return;
     const timer = setTimeout(() => {
       if (narrationQueue.current === session) stopNarration();
     }, 0);
     return () => clearTimeout(timer);
-  }, [narrationAllowed, activeBookId, language, index, nativeBackgroundAudio, stopNarration]);
+  }, [narrationAllowed, activeBookId, language, index, nativeBackgroundAudio, stopNarration, voiceSelectionKey]);
 
   useEffect(() => {
     if (!pendingVoiceStart || !voiceInstalled || voiceDownload !== null || !textReady || !narrationAllowed) return;
@@ -980,7 +997,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           const task = speechWork.current.then(async () => {
             if (signal.aborted) throw new Error('Speech cancelled.');
             const engine = await getSpeechEngine();
-            const voice = engine.info.voices.find(candidate => candidate.languages.includes(language));
+            const choice=voiceSelections[language];
+            const voice = engine.info.voices.find(candidate => candidate.id===choice.voiceId && candidate.languages.includes(language));
             if (!voice) throw new Error(t('No voice is available for this language.'));
             const database = await getTextDb(activeBookId);
             const row = await database.getFirstAsync<{en:string;hi:string;sa:string}>(
@@ -988,7 +1006,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             );
             if (signal.aborted) throw new Error('Speech cancelled.');
             if (!row?.[language]?.trim()) throw new Error(t('Could not read this passage'));
-            return cachedSpeech(engine, { text: row[language], language, voiceId: voice.id }, signal);
+            return cachedSpeech(engine, { text: row[language], language, voiceId: voice.id, rate:choice.rate, expressiveness:choice.model==='ninada'?choice.expressiveness:undefined }, signal);
           });
           speechWork.current = task.catch(() => {});
           return task;
@@ -1006,12 +1024,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           console.warn('Could not read this passage:', error);
         },
       });
-      narrationQueue.current = { queue, bookId: activeBookId, background: nativeBackgroundAudio, language };
+      narrationQueue.current = { queue, bookId: activeBookId, background: nativeBackgroundAudio, language, selectionKey:voiceSelectionKey };
       setNarrating(true);
       void queue.start();
     }, 0);
     return () => clearTimeout(timer);
-  }, [narrationAllowed, readAloud, textReady, voiceInstalled, runtimeAvailable, index, passages.length, activeBookId, language, narrationPlayer, getSpeechEngine, getTextDb, nativeBackgroundAudio, prepareNarrationPlayback, rememberPosition, stopReadAloud, t]);
+  }, [narrationAllowed, readAloud, textReady, voiceInstalled, runtimeAvailable, index, passages.length, activeBookId, language, narrationPlayer, getSpeechEngine, getTextDb, nativeBackgroundAudio, prepareNarrationPlayback, rememberPosition, stopReadAloud, t, voiceSelections, voiceSelectionKey]);
 
   useEffect(() => {
     if (!narrationOwnsControls || !nativeBackgroundAudio) return;
@@ -1124,7 +1142,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     setScreen('read');
     if (startReading) {
       router.navigate('/reader');
-      if (runtimeAvailable && voiceInstalled) {
+      const targetLanguage=book.languages.includes(language)?language:book.languages[0];
+      if (runtimeAvailable && modelInstalled(voiceSelections[targetLanguage].model)) {
         if (autoScrollEnabled) {
           setAutoScrollEnabled(false);
           savePreference('auto-scroll-enabled', 'false');
@@ -1132,7 +1151,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         readAloudRef.current = true;
         setReadAloud(true);
       } else {
-        requestVoice(book.passages[next]);
+        requestVoice(book.passages[next],book.id,targetLanguage);
       }
     } else {
       router.push('/reader');
@@ -1256,6 +1275,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Text style={styles.settingsMenuTitle}>{t("Reading voice")} · {t("Music")}</Text>
             <Text style={styles.settingsCreditText}>{t("Reading voice: Paradee by Sahil Mahendrakar.")}</Text>
             <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://github.com/sahilmahendrakar/paradee')} style={styles.settingsCreditLink}>{t("Voice source ↗")}</Text>
+            <Text style={styles.settingsCreditText}>Kokoro 82M · hexgrad and ONNX Community · Apache 2.0</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX')} style={styles.settingsCreditLink}>{appLanguage==='hi'?'Kokoro स्रोत और लाइसेंस ↗':'Kokoro source and license ↗'}</Text>
+            <Text style={styles.settingsCreditText}>Ninada · Hemanth HM · model weights CC BY 4.0 · tokenizer adapted from MIT-licensed code</Text>
+            <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://huggingface.co/gnumanth/ninada')} style={styles.settingsCreditLink}>{appLanguage==='hi'?'Ninada मॉडल स्रोत ↗':'Ninada model source ↗'}</Text>
+            <Text accessibilityRole="button" accessibilityState={{expanded:showNinadaLicense}} onPress={() => setShowNinadaLicense(value=>!value)} style={styles.settingsCreditLink}>{showNinadaLicense?(appLanguage==='hi'?'Ninada लाइसेंस छिपाएँ':'Hide Ninada code license'):(appLanguage==='hi'?'Ninada कोड लाइसेंस देखें':'View Ninada code license')}</Text>
+            {showNinadaLicense && <Text selectable style={styles.settingsCreditText}>{ninadaNotice}</Text>}
             {MUSIC_TRACKS.map(track => <View key={track.id} style={{gap:4}}><Text style={styles.settingsCreditText}>{track.title} · {track.artist} · CC BY 4.0</Text><Text accessibilityRole="link" onPress={() => void Linking.openURL(track.source)} style={styles.settingsCreditLink}>{t("Music source ↗")}</Text></View>)}
             <Text accessibilityRole="link" onPress={() => void Linking.openURL('https://creativecommons.org/licenses/by/4.0/')} style={styles.settingsCreditLink}>{t("License ↗")}</Text>
           </View>
@@ -1279,9 +1304,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           </View>
           <Text style={styles.imageHelp}>{t("Double-tap an English word while reading to look it up. Hindi and Sanskrit dictionaries are not available yet.")}</Text>
         </ScrollView> : settingsPage === 'downloads'  ? <ScrollView {...settingsScrollProps('downloads')} contentContainerStyle={styles.settingsList}>
-          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Downloaded · about 11 MB") : t("Not downloaded · about 11 MB")}</Text></View>
-            {voiceDownload !== null ? <Pressable accessibilityRole="button" onPress={cancelVoiceDownload}><Text style={styles.downloadCancel}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={styles.downloadCancel}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
-          </View>
+          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'आवाज़ मॉडल':'Voice models'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'रीडिंग प्लेबैक में डाउनलोड और चुनें।':'Manage downloads and voices in Reading playback.'}</Text></View><Pressable accessibilityRole="button" onPress={() => openSettingsPage('playback')}><Text style={styles.downloadCancel}>{appLanguage==='hi'?'खोलें':'Open'}</Text></Pressable></View>
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
             {dictionaryInstalled && dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Remove English dictionary")} onPress={deleteDictionary}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>}
           </View>
@@ -1302,11 +1325,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
               savePreference('background-reading-audio', String(value));
             }} trackColor={{true: colors.accent}} />
           </View>}
-          <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading voice")}</Text><Text style={styles.settingsMenuDescription}>{voiceDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(voiceDownload*100)}%` : voiceInstalled ? t("Paradee voice is available offline.") : t("Download an offline voice (about 11 MB).")}</Text></View>
-            {voiceDownload !== null ? <Pressable accessibilityRole="button" accessibilityLabel={t("Cancel voice download")} onPress={cancelVoiceDownload}><Text style={{color:colors.accent}}>{t("Cancel")}</Text></Pressable> : <Pressable accessibilityRole="button" accessibilityLabel={voiceInstalled ? t("Remove reading voice") : t("Download reading voice")} onPress={() => void (voiceInstalled ? removeVoice() : downloadVoice())}><Text style={{color:colors.accent,fontWeight:'600'}}>{voiceInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
-          </View>
-          {Platform.OS==='ios' && runtimeAvailable && <VoiceComparison colors={colors}/>}
+          {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onRemove={removeModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
           {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{t("Move to the next passage after a chosen time.")}</Text></View>
