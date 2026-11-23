@@ -73,7 +73,7 @@ export class ChapterScrubber extends React.Component<Props> {
     return <View pointerEvents="box-none" onLayout={event => {this.controlWidth=Math.max(1,(event.nativeEvent.layout.width-32)/2);}} style={{position:'absolute',left:0,right:0,bottom,height:44,alignItems:'center',justifyContent:'center'}}>
       <View {...this.pan.panHandlers} accessible accessibilityRole={count>1?'adjustable':'text'} accessibilityLabel={`${referenceLabel}, ${label}`} accessibilityHint={count>1?hint:undefined} accessibilityValue={count>1?{min:1,max:count,now:current+1,text:`${current+1} / ${count}`}:undefined} accessibilityActions={count>1?[{name:'increment'},{name:'decrement'}]:undefined} onAccessibilityAction={event => {if(event.nativeEvent.actionName==='increment') onSelect(Math.min(count-1,current+1)); else if(event.nativeEvent.actionName==='decrement') onSelect(Math.max(0,current-1));}} style={{height:44,width:active?'100%':200,paddingHorizontal:16,flexDirection:'row',alignItems:'center',justifyContent:active?'space-between':'center'}}>
         {active ? <>
-          <Text pointerEvents="none" style={[referenceStyle,{position:'absolute',left:0,right:0,bottom:36,textAlign:'center',transform:[{scale:1.3}]}]}>{reference}</Text>
+          <Text pointerEvents="none" style={[referenceStyle,{position:'absolute',left:0,right:0,bottom:52,textAlign:'center',transform:[{scale:1.3}]}]}>{reference}</Text>
           {Array.from({length:31},(_,i) => <View key={i} pointerEvents="none" style={{height:i===Math.round(current/Math.max(1,count-1)*30)?16:10,width:2,borderRadius:1,opacity:i===Math.round(current/Math.max(1,count-1)*30)?1:0.6,backgroundColor:light?'#fff':'#65686b'}}/>)}
         </> : <Text style={referenceStyle}>{reference}</Text>}
       </View>

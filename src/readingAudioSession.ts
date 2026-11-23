@@ -58,7 +58,7 @@ export class PassageAudioQueue {
 
   constructor(private options: PassageQueueOptions) {
     this.position = options.start;
-    this.first = Math.max(0, options.start - 1);
+    this.first = options.start;
   }
 
   get hasStarted() { return this.started; }
@@ -68,20 +68,34 @@ export class PassageAudioQueue {
 
   async start() {
     try {
-      // Prepare one previous passage before starting so it is a real native
-      // playlist item and can be reached even with the screen locked.
-      await this.append(this.first);
-      if (this.first !== this.position) await this.append(this.position);
+      // Start the current passage first; prepare the previous passage afterward.
+      await this.append(this.position);
       if (this.stopped) return;
-      if (this.first !== this.position) this.player.skipTo(this.position - this.first);
       const canPlay = await this.options.beforePlay();
       if (!canPlay || this.stopped) return;
       this.started = true;
       if (this.wantsPlayback) this.player.play();
-      void this.fill();
+      void this.preparePrevious();
     } catch (error) {
       if (!this.stopped) this.options.onError(error);
     }
+  }
+
+  private async preparePrevious() {
+    if (this.first>0 && !this.stopped) {
+      const previous=this.first-1;
+      try {
+        const file=await this.options.generate(previous,this.controller.signal);
+        if (this.stopped) {await file.dispose(); return;}
+        try {this.player.insert({uri:file.uri},0);}
+        catch (error) {await file.dispose(); throw error;}
+        this.files.unshift(file);
+        this.first=previous;
+      } catch (error) {
+        if (!this.stopped) console.warn('Could not prepare previous passage:',error);
+      }
+    }
+    if (!this.stopped) void this.fill();
   }
 
   private async append(position: number) {

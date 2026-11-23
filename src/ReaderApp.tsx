@@ -37,6 +37,7 @@ import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, P
 import { PARADEE_DOWNLOAD_BYTES } from './speech/paradee/assets';
 import { isParadeeInstalled } from './speech/paradee/storage';
 import { dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
+import { cachedSpeech, clearSpeechCache, pruneSpeechCache, speechCacheSize } from './speech/speechCache';
 import { isDoubleTap, selectedLookupWord, segmentPassage, selectionRange, type Tap, type TextSegment } from './lookupGesture';
 import type { DictionaryMeaning } from './dictionaryEngine';
 import { wordnetNotice } from './dictionaryNotice';
@@ -218,7 +219,11 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const [dictionaryInstalled, setDictionaryInstalled] = useState(() => dictionaryAvailable());
   const [dictionaryDownload, setDictionaryDownload] = useState<number | null>(null);
   const [narrating, setNarrating] = useState(false);
+  const [narrationError,setNarrationError] = useState(false);
+  const [speechCacheBytes,setSpeechCacheBytes] = useState(0);
+  useEffect(() => {const timer=setTimeout(() => {try {pruneSpeechCache(); setSpeechCacheBytes(speechCacheSize());} catch { /* Cache is optional. */ }},0); return () => clearTimeout(timer);}, [pathname]);
   const narrationPlayer = useAudioPlaylist({ updateInterval: 250 });
+  const narrationStatus = useAudioPlaylistStatus(narrationPlayer);
   const runtimeAvailable = Platform.OS !== 'web' && !!NativeModules.Onnxruntime;
   const [musicEnabled, setMusicEnabled] = useState(true);
   const [musicVolume, setMusicVolume] = useState(0.2);
@@ -849,6 +854,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     const status = narrationPlayer.addListener('playlistStatusUpdate', event => {
       if ('error' in event && event.error && narrationQueue.current) {
         console.warn('Could not play narration:', event.error);
+        setNarrationError(true);
         stopReadAloud();
       } else if (event.didJustFinish) {
         narrationQueue.current?.queue.finishTrack();
@@ -980,7 +986,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             );
             if (signal.aborted) throw new Error('Speech cancelled.');
             if (!row?.[language]?.trim()) throw new Error(t('Could not read this passage'));
-            return engine.synthesize({ text: row[language], language, voiceId: voice.id }, signal);
+            return cachedSpeech(engine, { text: row[language], language, voiceId: voice.id }, signal);
           });
           speechWork.current = task.catch(() => {});
           return task;
@@ -994,8 +1000,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         onFinish: stopReadAloud,
         onError: error => {
           stopReadAloud();
+          setNarrationError(true);
           console.warn('Could not read this passage:', error);
-          if (AppState.currentState === 'active') Alert.alert(t('Could not read this passage'), error instanceof Error ? error.message : t('Please try again.'));
         },
       });
       narrationQueue.current = { queue, bookId: activeBookId, background: nativeBackgroundAudio, language };
@@ -1019,6 +1025,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   }, [appActive, readingOpen]);
 
   function toggleReadAloud(value: boolean) {
+    if (value) setNarrationError(false);
     if (!value) { stopReadAloud(); return; }
     if (!readingOpen) {
       openBook(activeBook, false, true);
@@ -1045,6 +1052,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       }).catch(error => {
         if (narrationQueue.current !== session) return;
         stopReadAloud();
+        setNarrationError(true);
         console.warn('Could not resume read-aloud:', error);
       });
     }
@@ -1275,6 +1283,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
             {dictionaryInstalled && dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Remove English dictionary")} onPress={deleteDictionary}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>}
           </View>
+          <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'पठन ऑडियो कैश':'Narration cache'}</Text><Text style={styles.settingsMenuDescription}>{`${(speechCacheBytes/1000000).toFixed(1)} MB`}</Text></View><Pressable accessibilityRole="button" onPress={() => {try {clearSpeechCache(); const remaining=speechCacheSize(); setSpeechCacheBytes(remaining); if (remaining>0) Alert.alert(appLanguage==='hi'?'कैश साफ़ हो रहा है':'Clearing narration cache',appLanguage==='hi'?'उपयोग में मौजूद ऑडियो सुरक्षित रूप से हटाया जाएगा।':'Audio still in use will be cleared after playback releases it.');} catch {Alert.alert(appLanguage==='hi'?'कैश साफ़ नहीं हुआ':'Could not clear cache');}}}><Text style={styles.downloadCancel}>{appLanguage==='hi'?'साफ़ करें':'Clear'}</Text></Pressable></View>
           <Text style={styles.imageHelp}>{t("The dictionary can be downloaded when you double-tap an English word. Removing a resource does not remove your saved verses or notes.")}</Text>
         </ScrollView> : settingsPage === 'playback' ? <ScrollView {...settingsScrollProps('playback')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
@@ -1464,7 +1473,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   }
   function toggleReaderNarration() {
     cancelPendingLanguageTap();
-    if (readAloudRef.current) pauseReadAloud();
+    if (narrationError) {
+      Alert.alert(appLanguage==='hi'?'पठन शुरू नहीं हुआ':'Read-aloud could not start', appLanguage==='hi'?'कृपया फिर प्रयास करें।':'Please try again.', [
+        {text:appLanguage==='hi'?'बंद करें':'Close',style:'cancel'},
+        {text:appLanguage==='hi'?'फिर प्रयास करें':'Try again',onPress:() => toggleReadAloud(true)},
+      ]);
+    } else if (readAloudRef.current) pauseReadAloud();
     else toggleReadAloud(true);
   }
   function handlePassageTap(event:GestureResponderEvent, passageId:string) {
@@ -1488,11 +1502,12 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   const compactReaderControls=width-insets.left-insets.right < 48+44+languageControlWidth+44*3+8*3+32+16;
   const narrationUnavailable=!windowRows[index];
   const musicActionLabel=waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music");
-  const narrationActionLabel=readAloud ? t("Pause read aloud") : t("Play read aloud");
+  const narrationLoading=readAloud && (!narrationStatus.playing || narrationStatus.isBuffering);
+  const narrationActionLabel=narrationError ? (appLanguage==='hi'?'पठन में त्रुटि। फिर प्रयास करें':'Read-aloud error. Tap to retry') : narrationLoading ? (appLanguage==='hi'?'पठन तैयार हो रहा है। रद्द करने के लिए छुएँ':'Preparing read-aloud. Tap to cancel') : readAloud ? t("Pause read aloud") : t("Play read aloud");
   const readerHeaderLeft = <Pressable accessibilityRole="button" accessibilityLabel={t("Chapters")} onPress={() => {cancelPendingLanguageTap(); router.push('/chapters');}} style={styles.profileButton}>
           <SymbolView name={{ios:'list.bullet',android:'list',web:'list'}} tintColor={colors.ink} size={23}/>
         </Pressable>;
-  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}>{compactReaderControls ? <>{Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} onPress={() => {cancelPendingLanguageTap(); setWebAudioMenuOpen(true);}} style={styles.profileButton}><SymbolView name={{ios:'slider.horizontal.3',android:'tune',web:'tune'}} tintColor={colors.ink} size={22}/></Pressable> : <MenuView title={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} style={styles.profileButton} actions={[{id:'music',title:musicActionLabel,attributes:{disabled:waitingForMusic}},{id:'narration',title:narrationActionLabel,attributes:{disabled:narrationUnavailable}}]} onOpenMenu={() => {cancelPendingLanguageTap(); setReaderMenuOpen(true);}} onCloseMenu={() => setReaderMenuOpen(false)} onPressAction={event => {setReaderMenuOpen(false); if(event.nativeEvent.event==='music') toggleReadingMusic(); else if(event.nativeEvent.event==='narration') toggleReaderNarration();}}><View accessible accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} style={styles.profileButton}><SymbolView name={{ios:'slider.horizontal.3',android:'tune',web:'tune'}} tintColor={colors.ink} size={22}/></View></MenuView>}</> : <><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={toggleReadingMusic} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable><Pressable accessibilityRole="button" accessibilityLabel={narrationActionLabel} accessibilityState={{disabled:narrationUnavailable}} disabled={narrationUnavailable} onPress={toggleReaderNarration} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{readAloud ? <Path d="M9 5v14M15 5v14"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg></Pressable></>}
+  const readerHeaderRight = <View style={{flexDirection:'row',alignItems:'center',gap:8}}>{compactReaderControls ? <>{Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'}: ${narrationActionLabel}`} onPress={() => {cancelPendingLanguageTap(); setWebAudioMenuOpen(true);}} style={styles.profileButton}>{narrationError ? <Text style={{color:'#c53030',fontSize:22,fontWeight:'700'}}>!</Text> : narrationLoading ? <ActivityIndicator color={colors.ink} size="small"/> : <SymbolView name={{ios:'slider.horizontal.3',android:'tune',web:'tune'}} tintColor={colors.ink} size={22}/>}</Pressable> : <MenuView title={appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'} style={styles.profileButton} actions={[{id:'music',title:musicActionLabel,attributes:{disabled:waitingForMusic}},{id:'narration',title:narrationActionLabel,attributes:{disabled:narrationUnavailable}}]} onOpenMenu={() => {cancelPendingLanguageTap(); setReaderMenuOpen(true);}} onCloseMenu={() => setReaderMenuOpen(false)} onPressAction={event => {setReaderMenuOpen(false); if(event.nativeEvent.event==='music') toggleReadingMusic(); else if(event.nativeEvent.event==='narration') toggleReaderNarration();}}><View accessible accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'ऑडियो नियंत्रण':'Audio controls'}: ${narrationActionLabel}`} style={styles.profileButton}>{narrationError ? <Text style={{color:'#c53030',fontSize:22,fontWeight:'700'}}>!</Text> : narrationLoading ? <ActivityIndicator color={colors.ink} size="small"/> : <SymbolView name={{ios:'slider.horizontal.3',android:'tune',web:'tune'}} tintColor={colors.ink} size={22}/>}</View></MenuView>}</> : <><Pressable accessibilityRole="button" accessibilityLabel={waitingForMusic ? t("Loading reading music") : musicFailed && musicEnabled ? t("Music unavailable. Tap to retry") : musicEnabled ? t("Mute reading music") : t("Unmute reading music")} accessibilityState={{disabled:waitingForMusic}} disabled={waitingForMusic} onPress={toggleReadingMusic} style={styles.profileButton}>{waitingForMusic ? <ActivityIndicator color={colors.ink} size="small"/> : musicFailed && musicEnabled ? <Text style={{color:colors.ink,fontSize:22,fontWeight:'600'}}>!</Text> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round"><Path d="M11 5 6 9H3v6h3l5 4V5Z"/>{musicEnabled ? <Path d="M15 9a4 4 0 0 1 0 6M18 6a8 8 0 0 1 0 12"/> : <Path d="m16 9 5 6m0-6-5 6"/>}</Svg>}</Pressable><Pressable accessibilityRole="button" accessibilityLabel={narrationActionLabel} accessibilityState={{disabled:narrationUnavailable}} disabled={narrationUnavailable} onPress={toggleReaderNarration} style={styles.profileButton}>{narrationError ? <Text style={{color:'#c53030',fontSize:22,fontWeight:'700'}}>!</Text> : narrationLoading ? <ActivityIndicator color={colors.ink} size="small"/> : <Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{readAloud ? <Path d="M9 5v14M15 5v14"/> : <Path d="M8 5v14l11-7L8 5z"/>}</Svg>}</Pressable></>}
         <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage === 'hi' ? 'पाठ की भाषा बदलें। वर्तमान:' : 'Switch reading language. Current:'} ${language === 'en' ? t("English") : language === 'hi' ? t("Hindi") : t("Sanskrit")}`} onPress={switchReadingLanguage} onLayout={event => setLanguageControlWidth(event.nativeEvent.layout.width)} style={styles.language}><Text style={styles.languageText}>{language === 'en' ? t("English ▾") : language === 'hi' ? 'हिन्दी ▾' : 'संस्कृत ▾'}</Text></Pressable>
         {Platform.OS==='web' ? <Pressable accessibilityRole="button" accessibilityLabel={t("Book menu")} accessibilityState={{expanded:readerMenuOpen}} onPress={() => {cancelPendingLanguageTap(); setReaderMenuOpen(true);}} style={styles.profileButton}><Svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke={colors.ink} strokeWidth={2.5} strokeLinecap="round"><Path d="M5 12h.01M12 12h.01M19 12h.01"/></Svg></Pressable> : <MenuView
           title={t(activeBook.title)} style={styles.profileButton}
@@ -1602,8 +1617,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </View>}</View>{view !== 'chapters' && <Text style={styles.arrow}>↗</Text>}</Pressable>}/></View>}
     </View>
     </>
-    <BottomSheet isPresented={view === 'read' && view === screen && pathname === '/reader' && walkthroughVisible && walkthroughSheetOpen} onDismiss={() => {if (pathname === '/reader' && view === screen) void finishWalkthrough();}} snapPoints={['half','full']} containerColor={colors.white} contentPadding={0}>
-      <RNHostView><ScrollView nestedScrollEnabled style={{height:Math.max(200,Math.min(height*0.5-48,500))}} contentContainerStyle={{paddingHorizontal:24,paddingTop:8,paddingBottom:32}}><View accessibilityViewIsModal style={{gap:20,maxWidth:480,width:'100%',alignSelf:'center'}}>
+    <BottomSheet isPresented={view === 'read' && view === screen && pathname === '/reader' && walkthroughVisible && walkthroughSheetOpen} onDismiss={() => {if (pathname === '/reader' && view === screen) void finishWalkthrough();}} snapPoints={Platform.OS==='ios' ? [{height:Math.min(height*0.7, walkthroughStep===0 ? 390 : 310)},'full'] : ['half','full']} containerColor={colors.white} contentPadding={0}>
+      <RNHostView><ScrollView nestedScrollEnabled style={{height:Platform.OS==='ios' ? Math.max(200,Math.min(height*0.7-40, walkthroughStep===0 ? 350 : 270)) : Math.max(260,Math.min(height*0.45,560))}} contentContainerStyle={{paddingHorizontal:24,paddingTop:20,paddingBottom:24}}><View accessibilityViewIsModal style={{gap:20,maxWidth:480,width:'100%',alignSelf:'center'}}>
           <Text accessibilityLiveRegion="polite" style={{fontSize:14,color:colors.muted}}>{appLanguage==='hi' ? `${walkthroughStep+1} / 3 · ${2-walkthroughStep} शेष` : `${walkthroughStep+1} / 3 · ${2-walkthroughStep} remaining`}</Text>
           {walkthroughStep===0 ? <>
           <View style={{gap:8}}><Text accessibilityRole="header" style={{fontSize:22,fontWeight:'700',color:colors.ink}}>{appLanguage==='hi'?'पूरी स्क्रीन पर पढ़ें':'Read full screen'}</Text><Text style={{fontSize:15,lineHeight:23,color:colors.muted}}>{appLanguage==='hi'?'पढ़ते समय दो उंगलियों से स्क्रीन पर पिंच करें।':'Use two fingers while reading to change the view.'}</Text></View>

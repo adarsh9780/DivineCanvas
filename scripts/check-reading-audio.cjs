@@ -19,6 +19,7 @@ class TestPlaylist {
   remoteTransportPaused = false;
   playing = false;
   add(item) { this.items.push(item); }
+  insert(item,index) { this.items.splice(index,0,item); if (this.currentIndex >= index) this.currentIndex++; }
   skipTo(index) { this.currentIndex = index; }
   play() { this.playing = true; }
   pause() { this.playing = false; }

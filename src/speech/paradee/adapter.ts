@@ -92,7 +92,7 @@ class ParadeeEngine implements SpeechEngine {
     }
     checkAbort(signal); const joined=new Float32Array(rendered.reduce((sum,x)=>sum+x.length,0)); let offset=0; for (const part of rendered) {joined.set(part,offset);offset+=part.length;}
     const dir=new Directory(Paths.cache,'speech-output'); dir.create({idempotent:true,intermediates:true});
-    const file=new File(dir,`speech-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`); file.write(wav(joined));
+    const file=new File(dir,`speech-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`); await file.write(wav(joined));
     return {uri:file.uri,dispose:async()=>{if(file.exists) file.delete();}};
   }
   async dispose() { await this.voiceSession?.release(); await this.phonemeSession?.release(); this.voiceSession=undefined; this.phonemeSession=undefined; this.lexicon=undefined; this.config=undefined; }
