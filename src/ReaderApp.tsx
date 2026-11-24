@@ -39,7 +39,7 @@ import { createVoiceModel, defaultVoiceSelections, modelBytes, modelDownloadByte
 import type { SpeechEngine } from './speech/engine';
 import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
 import { voiceLabInstalled } from './speech/voiceLab';
-import { dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
+import { DICTIONARY_DOWNLOAD_BYTES, dictionaryAvailable, downloadDictionary, lookupWord, removeDictionary } from './dictionary';
 import { cachedSpeech, clearSpeechCache, pruneSpeechCache, speechCacheSize } from './speech/speechCache';
 import { isDoubleTap, selectedLookupWord, segmentPassage, selectionRange, type Tap, type TextSegment } from './lookupGesture';
 import type { DictionaryMeaning } from './dictionaryEngine';
@@ -924,8 +924,22 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
   }, [activeBookId, downloadModel, language, runtimeAvailable, t, setPendingVoiceStart, voiceSelections, appLanguage]);
 
   function cancelVoiceDownload() {setPendingVoiceStart(null); speechDownloadAbort.current?.abort();}
+  function freedStorage(bytes:number) {
+    const size=`${(bytes/1e6).toFixed(1)} MB`;
+    return appLanguage==='hi'?`${size} जगह खाली होगी`:`Frees ${size}`;
+  }
+  function downloadedResourcesLink() {
+    return <Pressable accessibilityRole="link" onPress={()=>openSettingsPage('downloads')} style={{minHeight:44,justifyContent:'center',alignSelf:'flex-start'}}>
+      <Text style={styles.settingsCreditLink}>{t("Downloaded resources")} ›</Text>
+    </Pressable>;
+  }
+  function removeResourceButton(title:string,onPress:()=>void) {
+    return <Pressable accessibilityRole="button" accessibilityLabel={`${t("Remove download")} · ${title}`} onPress={onPress} hitSlop={4} style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
+      <SymbolView name={{ios:'trash',android:'delete_outline',web:'delete_outline'}} size={19} tintColor={colors.muted}/>
+    </Pressable>;
+  }
   function confirmRemoveDictionary() {
-    Alert.alert(t("Remove download?"), appLanguage==='hi'?'अंग्रेज़ी शब्दकोश फिर डाउनलोड करने तक ऑफ़लाइन उपलब्ध नहीं होगा।':'Offline English word lookup will be unavailable until you download the dictionary again.', [
+    Alert.alert(t("Remove download?"), `${t("English dictionary")} · ${freedStorage(DICTIONARY_DOWNLOAD_BYTES)}\n\n${appLanguage==='hi'?'अंग्रेज़ी शब्दकोश फिर डाउनलोड करने तक ऑफ़लाइन उपलब्ध नहीं होगा।':'Offline English word lookup will be unavailable until you download the dictionary again.'}`, [
       {text:t("Cancel"),style:'cancel'},
       {text:t("Remove download"),style:'destructive',onPress:deleteDictionary},
     ]);
@@ -1193,7 +1207,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     finally {setBookDownload(null);}
   }
   function confirmRemoveBook(book:Book) {
-    Alert.alert(t("Remove download?"), appLanguage === 'hi' ? `आप ${t(book.title)} फिर से डाउनलोड कर सकते हैं। पढ़ने की स्थिति और नोट्स इस डिवाइस पर रहेंगे।` : `You can download ${book.title} again. Your reading progress and notes will stay on this device.`, [
+    const size=freedStorage(bookDownloads[book.id].bytes);
+    const impact=appLanguage==='hi'?'फिर डाउनलोड करने तक यह किताब ऑफ़लाइन उपलब्ध नहीं होगी। पढ़ने की स्थिति, सहेजे गए अंश और नोट्स इस डिवाइस पर रहेंगे।':'This book will be unavailable offline until you download it again. Your reading progress, saved passages, and notes will stay on this device.';
+    Alert.alert(t("Remove download?"), `${t(book.title)} · ${size}\n\n${impact}`, [
       {text:t("Cancel"),style:'cancel'},
       {text:t("Remove download"),style:'destructive',onPress:() => { void (async () => {
         try {
@@ -1323,7 +1339,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </ScrollView> : settingsPage === 'dictionary' ? <ScrollView {...settingsScrollProps('dictionary')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
-            {dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={dictionaryInstalled ? t("Remove English dictionary") : t("Download English dictionary")} onPress={() => {if (dictionaryInstalled) confirmRemoveDictionary(); else void installDictionaryFromSettings();}}><Text style={styles.downloadCancel}>{dictionaryInstalled ? t("Remove") : t("Download")}</Text></Pressable>}
+            {dictionaryInstalled ? downloadedResourcesLink() : dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Download English dictionary")} onPress={()=>void installDictionaryFromSettings()}><Text style={styles.downloadCancel}>{t("Download")}</Text></Pressable>}
           </View>
           <Text style={styles.imageHelp}>{t("Double-tap an English word while reading to look it up. Hindi and Sanskrit dictionaries are not available yet.")}</Text>
         </ScrollView> : settingsPage === 'downloads'  ? <ScrollView {...settingsScrollProps('downloads')} contentContainerStyle={styles.settingsList}>
@@ -1332,16 +1348,16 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           {books.filter(book=>installedBooks[book.id] && bookDownloads[book.id]).map(book=>
             <View key={book.id} style={styles.settingsListRow}>
               <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t(book.title)}</Text><Text style={styles.settingsMenuDescription}>{(bookDownloads[book.id].bytes/1e6).toFixed(1)} MB</Text></View>
-              <Pressable accessibilityRole="button" accessibilityLabel={`${t("Remove download")} · ${t(book.title)}`} onPress={()=>confirmRemoveBook(book)} style={{minHeight:44,justifyContent:'center'}}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>
+              {removeResourceButton(t(book.title),()=>confirmRemoveBook(book))}
             </View>)}
           <Text accessibilityRole="header" style={[styles.readingHeading,{marginTop:16}]}>{appLanguage==='hi'?'संगीत':'Music'}</Text>
           {MUSIC_TRACKS.filter(track=>track.id!==DEFAULT_MUSIC_ID && downloadedMusic[track.id]).map(track=>
             <View key={track.id} style={styles.settingsListRow}>
               <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{track.title}</Text><Text style={styles.settingsMenuDescription}>{(track.bytes/1e6).toFixed(1)} MB</Text></View>
-              <Pressable accessibilityRole="button" accessibilityLabel={`${t("Remove download")} · ${track.title}`} onPress={()=>Alert.alert(t("Remove download?"),`${track.title} · ${(track.bytes/1e6).toFixed(1)} MB\n\n${appLanguage==='hi'?'यह गीत ऑफ़लाइन संगीत सूची से हट जाएगा। आप इसे फिर डाउनलोड कर सकते हैं।':'This track will be removed from your offline music queue. You can download it again.'}`,[{text:t("Cancel"),style:'cancel'},{text:t("Remove download"),style:'destructive',onPress:()=>deleteMusic(track)}])} style={{minHeight:44,justifyContent:'center'}}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>
+              {removeResourceButton(track.title,()=>Alert.alert(t("Remove download?"),`${track.title} · ${freedStorage(track.bytes)}\n\n${appLanguage==='hi'?'यह गीत ऑफ़लाइन संगीत सूची से हट जाएगा। आप इसे फिर डाउनलोड कर सकते हैं।':'This track will be removed from your offline music queue. You can download it again.'}`,[{text:t("Cancel"),style:'cancel'},{text:t("Remove download"),style:'destructive',onPress:()=>deleteMusic(track)}]))}
             </View>)}
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
-            {dictionaryInstalled && dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Remove English dictionary")} onPress={confirmRemoveDictionary}><Text style={styles.downloadCancel}>{t("Remove")}</Text></Pressable>}
+            {dictionaryInstalled && dictionaryDownload === null && removeResourceButton(t("English dictionary"),confirmRemoveDictionary)}
           </View>
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'पठन ऑडियो कैश':'Narration cache'}</Text><Text style={styles.settingsMenuDescription}>{`${(speechCacheBytes/1000000).toFixed(1)} MB`}</Text></View><Pressable accessibilityRole="button" onPress={() => Alert.alert(appLanguage==='hi'?'पठन ऑडियो कैश साफ़ करें?':'Clear narration cache?',appLanguage==='hi'?'ज़रूरत पड़ने पर पठन ऑडियो फिर तैयार होगा।':'Read-aloud audio will be generated again as needed.',[
             {text:t("Cancel"),style:'cancel'},
@@ -1370,6 +1386,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           <View style={{height:1,backgroundColor:colors.line}} />
           {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
           {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
+          {runtimeAvailable && downloadedResourcesLink()}
         </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
@@ -1397,6 +1414,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
               {!installed && (progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{downloadProgressLabel(progress,appLanguage==='hi')}</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>)}
             </MusicReorderRow>;
           })}
+          {downloadedResourcesLink()}
           <Text style={[styles.imageHelp,{paddingVertical:16}]}>{appLanguage==='hi'?'गीत Creative Commons Attribution 4.0 के अंतर्गत हैं। विवरण क्रेडिट में देखें।':'Tracks are licensed under Creative Commons Attribution 4.0. See Credits for sources.'}</Text>
         </ScrollView> : settingsPage === 'chapter-select' ? <View style={{flex:1,paddingHorizontal:24}}>
           <TextInput accessibilityLabel={appLanguage==='hi'?'अध्याय खोजें':'Search chapters'} value={chapterSearch} onChangeText={setChapterSearch} placeholder={appLanguage==='hi'?'अध्याय संख्या या नाम खोजें':'Search chapter number or title'} placeholderTextColor={colors.muted} style={{color:colors.ink,borderBottomWidth:1,borderColor:colors.line,paddingVertical:14,fontSize:16}} />
