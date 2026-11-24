@@ -1331,7 +1331,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Use the play button to pause or resume.")}</Text></View>
             <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
-          {backgroundPlaybackAvailable && <View style={[styles.settingsListRow,{paddingLeft:16}]}>
+          {backgroundPlaybackAvailable && <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}>
               <Text style={styles.settingsMenuTitle}>{t("Background read-aloud")}</Text>
               <Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'जब पढ़कर सुनाना चालू हो, तब लॉक स्क्रीन पर आवाज़ और संगीत जारी रखें।':'When read-aloud is playing, continue the voice and music on the lock screen.'}</Text>

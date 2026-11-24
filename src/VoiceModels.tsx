@@ -29,7 +29,6 @@ const bundledSamples:Record<VoiceModel,Partial<Record<SpeechLanguage,Record<Gend
 const haptic=()=>{void Haptics.selectionAsync().catch(()=>{});};
 const mb=(n:number)=>(n/1000000).toFixed(1)+' MB';
 const formatRate=(n:number)=>Number.isInteger(n)?n.toFixed(1):String(n);
-const closestSpeed=(value:number)=>speeds.reduce((best,rate,i)=>Math.abs(rate-value)<Math.abs(speeds[best]-value)?i:best,0);
 
 type Props={colors:Palette;selections:VoiceSelections;onChange:(v:VoiceSelections)=>void;onDownload:(m:VoiceModel,quiet?:boolean)=>Promise<VoiceDownloadResult>;onRemove:(m:VoiceModel)=>Promise<void>;onPreview:(m:VoiceModel,l:SpeechLanguage,text:string,voiceId:string)=>Promise<GeneratedSpeech>;downloading:VoiceModel|null;progress:number|null;onCancel:()=>void;revision:number};
 export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPreview,downloading,progress,onCancel,revision}:Props) {
@@ -77,7 +76,7 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
   }
   return <View style={{gap:20,paddingVertical:24}}>
     <View style={{gap:5}}><Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'आवाज़ें':'Voices'}</Text><Text style={detail}>{hi?'मॉडल चुनने पर उसका नमूना अपने आप बजेगा। डाउनलोड से पहले भी नमूना सुन सकते हैं।':'Selecting a model plays its sample automatically. You can also listen before downloading.'}</Text></View>
-    {langs.map(lang=>{const choice=selections[lang];const options=models.filter(model=>modelVoices[model][lang].length);const voices=modelVoices[choice.model][lang];const available=revision>=0 && modelInstalled(choice.model);const speedIndex=closestSpeed(choice.rate);const gender=(voices.find(v=>v.id===choice.voiceId)?.name ?? 'Female') as Gender;return <View key={lang} style={{gap:12,padding:16,borderRadius:14,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line}}>
+    {langs.map(lang=>{const choice=selections[lang];const options=models.filter(model=>modelVoices[model][lang].length);const voices=modelVoices[choice.model][lang];const available=revision>=0 && modelInstalled(choice.model);const previewKey=`${lang}-${choice.model}-current`;const loadingPreview=busy===previewKey;const playingPreview=playing===previewKey;const controlsDisabled=!available || !!downloading || !!pending || !!busy;const gender=(voices.find(v=>v.id===choice.voiceId)?.name ?? 'Female') as Gender;return <View key={lang} style={{gap:12,padding:16,borderRadius:14,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line}}>
       <Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{label(lang)}</Text>
       <View style={{gap:6}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'आवाज़':'Voice'}</Text><SegmentedControl accessibilityLabel={`${label(lang)} ${hi?'आवाज़':'voice'}`} values={hi?['महिला','पुरुष']:['Female','Male']} selectedIndex={gender==='Female'?0:1} enabled={!downloading && !pending} appearance={colors.dark?'dark':'light'} onChange={event=>{const name=event.nativeEvent.selectedSegmentIndex===0?'Female':'Male';const voice=voices.find(v=>v.name===name);if(voice && voice.id!==choice.voiceId){haptic();stop();onChange({...selections,[lang]:{...choice,voiceId:voice.id}});}}}/></View>
       {options.map(model=>{const installed=modelInstalled(model),selected=choice.model===model,key=`${model}-${lang}`;const state=voiceDownloadState(installed,downloading===model || pending?.model===model,progress,!!failed[model],modelDownloadBytes(model));const blocked=!!downloading || !!pending || !!busy || (offline && state.kind!=='downloaded');const size=mb(state.kind==='notDownloaded'||state.kind==='failed'?state.bytes:modelStorageBytes(model));
@@ -89,19 +88,39 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
             {state.kind==='notDownloaded' && !offline && <SymbolView name={{ios:'arrow.down.circle',android:'download',web:'download'}} size={25} tintColor={colors.accent}/>}
           </Pressable>
           {state.kind==='downloading' && downloading===model?<Pressable accessibilityRole="button" accessibilityLabel={`${hi?'डाउनलोड रद्द करें':'Cancel download'} ${titles[model]}`} onPress={onCancel} style={{minWidth:44,minHeight:44,alignItems:'center',justifyContent:'center'}}><Text style={action}>×</Text></Pressable>:!installed && <Pressable accessibilityRole="button" accessibilityLabel={`${playing===key?'Stop':'Play'} ${label(lang)} ${gender} sample with ${titles[model]}`} disabled={!!downloading || !!pending || !!busy} onPress={()=>void play(model,lang)} style={{minWidth:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>{busy===key?<ActivityIndicator color={colors.accent}/>:<SymbolView name={{ios:playing===key?'stop.circle':'play.circle',android:playing===key?'stop_circle':'play_circle',web:playing===key?'stop_circle':'play_circle'}} size={25} tintColor={colors.accent}/>}</Pressable>}
-          {installed && (busy===`${lang}-${model}-current` ? (
-            <View style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
-              <ActivityIndicator color={colors.accent} accessibilityLabel={hi?`${titles[model]} का नमूना तैयार हो रहा है`:`Preparing ${titles[model]} sample`} />
-            </View>
-          ) : <Pressable accessibilityRole="button" accessibilityLabel={`${hi?'डाउनलोड हटाएँ':'Remove download for'} ${titles[model]}`} disabled={blocked || !!playing} onPress={()=>confirmRemove(model)} style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
+          {installed && <Pressable accessibilityRole="button" accessibilityLabel={`${hi?'डाउनलोड हटाएँ':'Remove download for'} ${titles[model]}`} disabled={blocked || !!playing} onPress={()=>confirmRemove(model)} style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
             <SymbolView name={{ios:'trash',android:'delete_outline',web:'delete_outline'}} size={19} tintColor={colors.muted}/>
-          </Pressable>)}
+          </Pressable>}
         </View>;})}
       {choice.model==='paradee' && lang==='sa' && <Text style={detail}>{hi?'संस्कृत में हिन्दी उच्चारण का उपयोग होता है।':'Sanskrit uses Hindi pronunciation.'}</Text>}
       <View style={{height:1,backgroundColor:colors.line}}/>
-      <View style={{gap:3,opacity:available?1:0.5}}><View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'गति':'Speed'}</Text><Text style={detail}>{formatRate(choice.rate)}×</Text></View><Slider disabled={!available || !!downloading} accessibilityLabel={`${label(lang)} ${hi?'गति':'speed'}`} accessibilityValue={{min:0.5,max:2,now:choice.rate,text:`${formatRate(choice.rate)} ${hi?'गुना':'times'}`}} minimumValue={0} maximumValue={speeds.length-1} step={1} value={speedIndex} onValueChange={index=>{const rate=speeds[Math.round(index)];if(rate!==undefined && rate!==choice.rate){haptic();stop();onChange({...selections,[lang]:{...choice,rate}});}}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent}/><View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={detail}>0.5×</Text><Text style={detail}>2.0×</Text></View></View>
+      <View style={{gap:8,opacity:controlsDisabled?0.5:1}}>
+        <Text style={{fontSize:15,color:colors.ink}}>{hi?'गति':'Speed'}</Text>
+        <View style={{flexDirection:'row',flexWrap:'wrap',gap:8}}>
+          {speeds.map(rate=>{
+            const selected=rate===choice.rate;
+            return <Pressable key={rate} accessibilityRole="radio" accessibilityState={{checked:selected,disabled:controlsDisabled}} accessibilityLabel={`${label(lang)} ${hi?'गति':'speed'} ${formatRate(rate)}×`} disabled={controlsDisabled} onPress={()=>{
+              if(selected)return;
+              haptic();
+              stop();
+              onChange({...selections,[lang]:{...choice,rate}});
+            }} style={{minHeight:44,minWidth:44,paddingHorizontal:8,justifyContent:'center',alignItems:'center',borderRadius:10,borderWidth:1,borderColor:selected?colors.accent:colors.line,backgroundColor:selected?colors.accent:colors.white}}>
+              <Text style={{fontSize:14,color:selected?colors.onAccent:colors.ink}}>{formatRate(rate)}×</Text>
+            </Pressable>;
+          })}
+        </View>
+      </View>
       {choice.model==='ninada' && <View style={{gap:3,opacity:available?1:0.5}}><View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'आवाज़ में विविधता':'Voice variation'} · {Math.round(choice.expressiveness*100)}%</Text><Pressable accessibilityRole="button" disabled={!available || !!downloading} onPress={()=>{haptic();stop();onChange({...selections,[lang]:{...choice,expressiveness:0.667}});}} style={{minHeight:44,justifyContent:'center'}}><Text style={action}>{hi?'डिफ़ॉल्ट':'Default'}</Text></Pressable></View><Text style={detail}>{hi?'Ninada में आवाज़ की विविधता बदल सकते हैं।':'Ninada supports voice variation; higher values add variety.'}</Text><Slider disabled={!available || !!downloading} accessibilityLabel={`${label(lang)} ${hi?'आवाज़ में विविधता':'voice variation'}`} accessibilityValue={{min:0,max:100,now:Math.round(choice.expressiveness*100),text:`${Math.round(choice.expressiveness*100)}%`}} minimumValue={0} maximumValue={1} step={0.1} value={choice.expressiveness} onValueChange={value=>{const v=Number(value.toFixed(1));if(v!==choice.expressiveness){haptic();stop();onChange({...selections,[lang]:{...choice,expressiveness:v}});}}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent}/></View>}
-      <Pressable accessibilityRole="button" accessibilityLabel={`${playing===`${lang}-${choice.model}-current`?'Stop':'Preview'} ${label(lang)} ${titles[choice.model]} ${gender} ${formatRate(choice.rate)} times`} accessibilityState={{disabled:!available || !!busy || !!downloading || !!pending}} disabled={!available || !!busy || !!downloading || !!pending} onPress={()=>void play(choice.model,lang,true)} style={{minHeight:44,alignSelf:'flex-start',justifyContent:'center',opacity:available?1:0.5}}><Text style={action}>{playing===`${lang}-${choice.model}-current`?'■':'▶'} {hi?'नमूना सुनें':'Preview'} {titles[choice.model]} · {gender} · {formatRate(choice.rate)}×</Text></Pressable>
+      <Pressable accessibilityRole="button" accessibilityLabel={`${loadingPreview?(hi?'नमूना तैयार हो रहा है':'Preparing sample'):playingPreview?(hi?'नमूना रोकें':'Stop preview'):(hi?'नमूना सुनें':'Play preview')} · ${label(lang)} · ${titles[choice.model]} · ${formatRate(choice.rate)}×`} accessibilityState={{disabled:controlsDisabled,busy:loadingPreview}} disabled={controlsDisabled} onPress={()=>void play(choice.model,lang,true)} style={{minHeight:52,paddingHorizontal:12,paddingVertical:8,flexDirection:'row',alignItems:'center',gap:12,borderWidth:1,borderColor:colors.line,borderRadius:12,opacity:available?1:0.5}}>
+        <View style={{width:28,alignItems:'center'}}>
+          {loadingPreview ? <ActivityIndicator color={colors.accent}/> :
+            <SymbolView name={{ios:playingPreview?'stop.circle':'play.circle',android:playingPreview?'stop_circle':'play_circle',web:playingPreview?'stop_circle':'play_circle'}} size={28} tintColor={colors.accent}/>}
+        </View>
+        <View style={{flex:1}}>
+          <Text style={action}>{loadingPreview?(hi?'नमूना तैयार हो रहा है…':'Preparing sample…'):playingPreview?(hi?'नमूना रोकें':'Stop preview'):(hi?'नमूना सुनें':'Preview')}</Text>
+          <Text style={detail}>{titles[choice.model]} · {hi?(gender==='Female'?'महिला':'पुरुष'):gender} · {formatRate(choice.rate)}×</Text>
+        </View>
+      </Pressable>
     </View>;})}
   </View>;
 }
