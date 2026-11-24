@@ -4,6 +4,8 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as SQLite from 'expo-sqlite';
 import { useAudioPlaylist, useAudioPlaylistStatus, type AudioSource } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
+import * as Network from 'expo-network';
+import { needsCellularConfirmation, networkOffline, type VoiceDownloadResult } from './speech/voiceDownloadState';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
@@ -32,7 +34,7 @@ import { MusicReorderRow } from './MusicReorderRow';
 import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
 import { VoiceModels } from './VoiceModels';
-import { createVoiceModel, defaultVoiceSelections, modelBytes, modelDownloadBytes, modelInstalled, modelVoices, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
+import { createVoiceModel, defaultVoiceSelections, modelBytes, modelDownloadBytes, modelInstalled, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
 import type { SpeechEngine } from './speech/engine';
 import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
 import { voiceLabInstalled } from './speech/voiceLab';
@@ -887,24 +889,32 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     if (!speechEngine.current) {speechEngine.current=createVoiceModel(model);speechEngineId.current=model;}
     return speechEngine.current;
   }, [language,voiceSelections]);
-  const downloadModel = useCallback(async (model:VoiceModel) => {
-    if (!runtimeAvailable) {Alert.alert(t("Development build needed"),t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return false;}
-    if (speechDownloadAbort.current) return false;
-    const controller=new AbortController();speechDownloadAbort.current=controller;setDownloadingModel(model);setVoiceDownload(0);
+  const downloadModel = useCallback(async (model:VoiceModel, quiet=false):Promise<VoiceDownloadResult> => {
+    if (!runtimeAvailable) {Alert.alert(t("Development build needed"),t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return 'failed';}
+    if (speechDownloadAbort.current) return 'cancelled';
+    const controller=new AbortController();speechDownloadAbort.current=controller;
     try {
-      stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);
+      let network:Network.NetworkState={};try {network=await Network.getNetworkStateAsync();} catch { /* Unknown connection: let the download report any error. */ }
+      if(networkOffline(network)) {if(!quiet)Alert.alert(appLanguage==='hi'?'इंटरनेट से जुड़ें':'Connect to download');return 'offline';}
+      const bytes=modelDownloadBytes(model);
+      if(needsCellularConfirmation(network,bytes)) {
+        const accepted=await new Promise<boolean>(resolve=>Alert.alert(appLanguage==='hi'?'मोबाइल डेटा से डाउनलोड करें?':'Download using mobile data?',`${(bytes/1000000).toFixed(1)} MB`,[{text:appLanguage==='hi'?'रद्द करें':'Cancel',style:'cancel',onPress:()=>resolve(false)},{text:appLanguage==='hi'?'डाउनलोड':'Download',onPress:()=>resolve(true)}],{cancelable:true,onDismiss:()=>resolve(false)}));
+        if(!accepted || controller.signal.aborted)return 'cancelled';
+      }
+      if(controller.signal.aborted)return 'cancelled';
+      setDownloadingModel(model);setVoiceDownload(0);stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);
       await engine.install({signal:controller.signal,onProgress:p=>setVoiceDownload(Math.min(1,p.completedBytes/(p.totalBytes ?? modelBytes(model))))});
-      if(!controller.signal.aborted){setModelRevision(n=>n+1);return true;}
-      return false;
-    } catch(error) {setPendingVoiceStart(null);if(!controller.signal.aborted)Alert.alert(t("Voice download failed"),error instanceof Error?error.message:t("Please try again."));return false;}
+      if(!controller.signal.aborted){setModelRevision(n=>n+1);return 'success';}
+      return 'cancelled';
+    } catch(error) {setPendingVoiceStart(null);if(!controller.signal.aborted && !quiet)Alert.alert(t("Voice download failed"),error instanceof Error?error.message:t("Please try again."));return controller.signal.aborted?'cancelled':'failed';}
     finally {speechDownloadAbort.current=null;setDownloadingModel(null);setVoiceDownload(null);}
-  },[runtimeAvailable,t,stopReadAloud,getSpeechEngine,setDownloadingModel,setVoiceDownload,setModelRevision,setPendingVoiceStart]);
+  },[runtimeAvailable,t,stopReadAloud,getSpeechEngine,setDownloadingModel,setVoiceDownload,setModelRevision,setPendingVoiceStart,appLanguage]);
   const requestVoice = useCallback((passage: Passage, targetBookId:string = activeBookId, targetLanguage:'en'|'hi'|'sa' = language) => {
     if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("The offline voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
     if (speechDownloadAbort.current) {Alert.alert(t("Download in progress"), t("The reading voice is already downloading.")); return;}
     Alert.alert(t("Download offline voice?"), `${voiceSelections[targetLanguage].model} · ${appLanguage==='hi'?'अधिकतम':'up to'} ${(modelDownloadBytes(voiceSelections[targetLanguage].model)/1000000).toFixed(1)} MB`, [
       {text:t("Not now"), style:'cancel'},
-      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:targetBookId, passageId:passage.id, language:targetLanguage}); void downloadModel(voiceSelections[targetLanguage].model);}},
+      {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:targetBookId, passageId:passage.id, language:targetLanguage}); void downloadModel(voiceSelections[targetLanguage].model).then(result=>{if(result!=='success')setPendingVoiceStart(null);});}},
     ]);
   }, [activeBookId, downloadModel, language, runtimeAvailable, t, setPendingVoiceStart, voiceSelections, appLanguage]);
 
@@ -926,8 +936,8 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     catch(error){Alert.alert(t("Could not remove voice"),error instanceof Error?error.message:t("Please try again."));}
   }
   function updateVoiceSelections(next:VoiceSelections) {stopReadAloud();setVoiceSelections(next);savePreference('voice-selections',JSON.stringify(next));}
-  async function previewVoice(model:VoiceModel,lang:'en'|'hi'|'sa',text:string) {
-    stopReadAloud();const task=speechWork.current.then(async()=>{const engine=await getSpeechEngine(model);const selected=voiceSelections[lang].model===model?voiceSelections[lang]:{model,voiceId:modelVoices[model][lang][0].id,rate:1,expressiveness:0.667};return engine.synthesize({text,language:lang,voiceId:selected.voiceId,rate:selected.rate,expressiveness:selected.expressiveness});});speechWork.current=task.catch(()=>{});return task;
+  async function previewVoice(model:VoiceModel,lang:'en'|'hi'|'sa',text:string,voiceId:string) {
+    stopReadAloud();const task=speechWork.current.then(async()=>{const engine=await getSpeechEngine(model);const selected=voiceSelections[lang];return engine.synthesize({text,language:lang,voiceId,rate:selected.rate,expressiveness:selected.expressiveness});});speechWork.current=task.catch(()=>{});return task;
   }
   const narrationAllowed = ready && readingOpen && readingAudioAllowed && !walkthroughVisible &&
     editing === null && dictionaryWord === null && sharingId === null;
@@ -1316,10 +1326,10 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Use the play button to pause or resume.")}</Text></View>
             <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
-          {backgroundPlaybackAvailable && <View style={styles.settingsListRow}>
+          {backgroundPlaybackAvailable && <View style={[styles.settingsListRow,{paddingLeft:16}]}>
             <View style={styles.settingsMenuText}>
               <Text style={styles.settingsMenuTitle}>{t("Background read-aloud")}</Text>
-              <Text style={styles.settingsMenuDescription}>{t("Keep read-aloud and its accompanying music playing when you lock your device or switch apps.")}</Text>
+              <Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'जब पढ़कर सुनाना चालू हो, तब लॉक स्क्रीन पर आवाज़ और संगीत जारी रखें।':'When read-aloud is playing, continue the voice and music on the lock screen.'}</Text>
             </View>
             <Switch accessibilityLabel={t("Background read-aloud")} value={backgroundReadingAudio} onValueChange={value => {
               setBackgroundReadingAudio(value);
@@ -1328,7 +1338,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           </View>}
           {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onRemove={removeModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
           {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
-          <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.readingHeading}>{t("Auto-scroll")}</Text></View>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'समय पूरा होने पर अगला अंश दिखाएँ। पढ़कर सुनाने पर आवाज़ पूरी होने के बाद आगे बढ़ेगा।':'Move to the next passage after a set time. Read-aloud advances when the voice finishes.'}</Text></View>
             <Switch accessibilityLabel={t("Auto-scroll")} value={autoScrollEnabled} onValueChange={value => {if (value) stopReadAloud(); setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />

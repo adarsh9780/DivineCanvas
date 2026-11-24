@@ -1,0 +1,16 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const ts=require('typescript');
+const code=ts.transpileModule(fs.readFileSync('src/speech/voiceDownloadState.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+const api={};new Function('exports',code)(api);
+assert.deepEqual(api.voiceDownloadState(false,false,null,false,94500000),{kind:'notDownloaded',bytes:94500000});
+assert.deepEqual(api.voiceDownloadState(false,true,0.42,false,94500000),{kind:'downloading',progress:0.42});
+assert.equal(api.voiceDownloadState(true,false,null,true,0).kind,'downloaded');
+assert.equal(api.voiceDownloadState(false,false,null,true,100).kind,'failed');
+assert.equal(api.networkOffline({type:'NONE',isConnected:false}),true);
+assert.equal(api.networkOffline({type:'UNKNOWN',isConnected:false}),false);
+assert.equal(api.networkOffline({type:'WIFI',isConnected:true,isInternetReachable:false}),true);
+assert.equal(api.needsCellularConfirmation({type:'CELLULAR'},94500000),true);
+assert.equal(api.needsCellularConfirmation({type:'WIFI'},94500000),false);
+assert.equal(api.needsCellularConfirmation({type:'CELLULAR'},50000000),false);
+console.log('PASS: voice download states, connection handling and cellular confirmation');
