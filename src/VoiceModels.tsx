@@ -76,7 +76,7 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
     Alert.alert(hi?'डाउनलोड हटाएँ?':'Remove download?',`${titles[model]} · ${hi?`${size} जगह खाली होगी`:`Frees ${size}`}${shared}${warning}`,[{text:hi?'रद्द करें':'Cancel',style:'cancel'},{text:hi?'हटाएँ':'Remove',style:'destructive',onPress:()=>{stop();void onRemove(model);}}]);
   }
   return <View style={{gap:20,paddingVertical:24}}>
-    <View style={{gap:5}}><Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'आवाज़ें':'Voices'}</Text><Text style={detail}>{hi?'हर भाषा के लिए मॉडल चुनें। डाउनलोड से पहले नमूना सुनें।':'Choose a model for each language. Listen before downloading.'}</Text></View>
+    <View style={{gap:5}}><Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'आवाज़ें':'Voices'}</Text><Text style={detail}>{hi?'मॉडल चुनने पर उसका नमूना अपने आप बजेगा। डाउनलोड से पहले भी नमूना सुन सकते हैं।':'Selecting a model plays its sample automatically. You can also listen before downloading.'}</Text></View>
     {langs.map(lang=>{const choice=selections[lang];const options=models.filter(model=>modelVoices[model][lang].length);const voices=modelVoices[choice.model][lang];const available=revision>=0 && modelInstalled(choice.model);const speedIndex=closestSpeed(choice.rate);const gender=(voices.find(v=>v.id===choice.voiceId)?.name ?? 'Female') as Gender;return <View key={lang} style={{gap:12,padding:16,borderRadius:14,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line}}>
       <Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{label(lang)}</Text>
       <View style={{gap:6}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'आवाज़':'Voice'}</Text><SegmentedControl accessibilityLabel={`${label(lang)} ${hi?'आवाज़':'voice'}`} values={hi?['महिला','पुरुष']:['Female','Male']} selectedIndex={gender==='Female'?0:1} enabled={!downloading && !pending} appearance={colors.dark?'dark':'light'} onChange={event=>{const name=event.nativeEvent.selectedSegmentIndex===0?'Female':'Male';const voice=voices.find(v=>v.name===name);if(voice && voice.id!==choice.voiceId){haptic();stop();onChange({...selections,[lang]:{...choice,voiceId:voice.id}});}}}/></View>
@@ -89,9 +89,13 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
             {state.kind==='notDownloaded' && !offline && <SymbolView name={{ios:'arrow.down.circle',android:'download',web:'download'}} size={25} tintColor={colors.accent}/>}
           </Pressable>
           {state.kind==='downloading' && downloading===model?<Pressable accessibilityRole="button" accessibilityLabel={`${hi?'डाउनलोड रद्द करें':'Cancel download'} ${titles[model]}`} onPress={onCancel} style={{minWidth:44,minHeight:44,alignItems:'center',justifyContent:'center'}}><Text style={action}>×</Text></Pressable>:!installed && <Pressable accessibilityRole="button" accessibilityLabel={`${playing===key?'Stop':'Play'} ${label(lang)} ${gender} sample with ${titles[model]}`} disabled={!!downloading || !!pending || !!busy} onPress={()=>void play(model,lang)} style={{minWidth:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>{busy===key?<ActivityIndicator color={colors.accent}/>:<SymbolView name={{ios:playing===key?'stop.circle':'play.circle',android:playing===key?'stop_circle':'play_circle',web:playing===key?'stop_circle':'play_circle'}} size={25} tintColor={colors.accent}/>}</Pressable>}
-          {installed && <Pressable accessibilityRole="button" accessibilityLabel={`${hi?'डाउनलोड हटाएँ':'Remove download for'} ${titles[model]}`} disabled={blocked || !!playing} onPress={()=>confirmRemove(model)} style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
+          {installed && (busy===`${lang}-${model}-current` ? (
+            <View style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
+              <ActivityIndicator color={colors.accent} accessibilityLabel={hi?`${titles[model]} का नमूना तैयार हो रहा है`:`Preparing ${titles[model]} sample`} />
+            </View>
+          ) : <Pressable accessibilityRole="button" accessibilityLabel={`${hi?'डाउनलोड हटाएँ':'Remove download for'} ${titles[model]}`} disabled={blocked || !!playing} onPress={()=>confirmRemove(model)} style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
             <SymbolView name={{ios:'trash',android:'delete_outline',web:'delete_outline'}} size={19} tintColor={colors.muted}/>
-          </Pressable>}
+          </Pressable>)}
         </View>;})}
       {choice.model==='paradee' && lang==='sa' && <Text style={detail}>{hi?'संस्कृत में हिन्दी उच्चारण का उपयोग होता है।':'Sanskrit uses Hindi pronunciation.'}</Text>}
       <View style={{height:1,backgroundColor:colors.line}}/>
