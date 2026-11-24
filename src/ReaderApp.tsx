@@ -32,7 +32,7 @@ import { MusicReorderRow } from './MusicReorderRow';
 import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
 import { VoiceModels } from './VoiceModels';
-import { createVoiceModel, defaultVoiceSelections, modelBytes, modelInstalled, modelVoices, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
+import { createVoiceModel, defaultVoiceSelections, modelBytes, modelDownloadBytes, modelInstalled, modelVoices, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
 import type { SpeechEngine } from './speech/engine';
 import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
 import { voiceLabInstalled } from './speech/voiceLab';
@@ -506,7 +506,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       setDefaultImmersive(values['default-fullscreen'] === 'true');
       if (values['auto-scroll-enabled'] === 'true') setAutoScrollEnabled(true);
       const savedScrollSeconds = Number(values['auto-scroll-seconds']);
-      if (Number.isInteger(savedScrollSeconds) && savedScrollSeconds >= 5 && savedScrollSeconds <= 60) setAutoScrollSeconds(savedScrollSeconds);
+      if (Number.isInteger(savedScrollSeconds) && savedScrollSeconds >= 3 && savedScrollSeconds <= 60) setAutoScrollSeconds(Math.min(30,savedScrollSeconds));
       setBackgroundReadingAudio(values['background-reading-audio'] === 'true');
       if (values['music-enabled'] === 'false') setMusicEnabled(false);
       let savedOrder=MUSIC_TRACKS.map(track => track.id);
@@ -888,20 +888,21 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     return speechEngine.current;
   }, [language,voiceSelections]);
   const downloadModel = useCallback(async (model:VoiceModel) => {
-    if (!runtimeAvailable) {Alert.alert(t("Development build needed"),t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
-    if (speechDownloadAbort.current) return;
+    if (!runtimeAvailable) {Alert.alert(t("Development build needed"),t("This voice requires an app build with the speech runtime. Expo Go cannot run it.")); return false;}
+    if (speechDownloadAbort.current) return false;
     const controller=new AbortController();speechDownloadAbort.current=controller;setDownloadingModel(model);setVoiceDownload(0);
     try {
       stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);
       await engine.install({signal:controller.signal,onProgress:p=>setVoiceDownload(Math.min(1,p.completedBytes/(p.totalBytes ?? modelBytes(model))))});
-      if(!controller.signal.aborted)setModelRevision(n=>n+1);
-    } catch(error) {setPendingVoiceStart(null);if(!controller.signal.aborted)Alert.alert(t("Voice download failed"),error instanceof Error?error.message:t("Please try again."));}
+      if(!controller.signal.aborted){setModelRevision(n=>n+1);return true;}
+      return false;
+    } catch(error) {setPendingVoiceStart(null);if(!controller.signal.aborted)Alert.alert(t("Voice download failed"),error instanceof Error?error.message:t("Please try again."));return false;}
     finally {speechDownloadAbort.current=null;setDownloadingModel(null);setVoiceDownload(null);}
   },[runtimeAvailable,t,stopReadAloud,getSpeechEngine,setDownloadingModel,setVoiceDownload,setModelRevision,setPendingVoiceStart]);
   const requestVoice = useCallback((passage: Passage, targetBookId:string = activeBookId, targetLanguage:'en'|'hi'|'sa' = language) => {
     if (!runtimeAvailable) {Alert.alert(t("Development build needed"), t("The offline voice requires an app build with the speech runtime. Expo Go cannot run it.")); return;}
     if (speechDownloadAbort.current) {Alert.alert(t("Download in progress"), t("The reading voice is already downloading.")); return;}
-    Alert.alert(t("Download offline voice?"), `${voiceSelections[targetLanguage].model} · ${appLanguage==='hi'?'अधिकतम':'up to'} ${(modelBytes(voiceSelections[targetLanguage].model)/1000000).toFixed(1)} MB`, [
+    Alert.alert(t("Download offline voice?"), `${voiceSelections[targetLanguage].model} · ${appLanguage==='hi'?'अधिकतम':'up to'} ${(modelDownloadBytes(voiceSelections[targetLanguage].model)/1000000).toFixed(1)} MB`, [
       {text:t("Not now"), style:'cancel'},
       {text:t("Download"), onPress:() => {setPendingVoiceStart({bookId:targetBookId, passageId:passage.id, language:targetLanguage}); void downloadModel(voiceSelections[targetLanguage].model);}},
     ]);
@@ -1327,14 +1328,15 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           </View>}
           {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onRemove={removeModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
           {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
+          <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.readingHeading}>{t("Auto-scroll")}</Text></View>
           <View style={styles.settingsListRow}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{t("Move to the next passage after a chosen time.")}</Text></View>
+            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'समय पूरा होने पर अगला अंश दिखाएँ। पढ़कर सुनाने पर आवाज़ पूरी होने के बाद आगे बढ़ेगा।':'Move to the next passage after a set time. Read-aloud advances when the voice finishes.'}</Text></View>
             <Switch accessibilityLabel={t("Auto-scroll")} value={autoScrollEnabled} onValueChange={value => {if (value) stopReadAloud(); setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />
           </View>
-          <View style={{paddingVertical:18}}>
+          <View style={{paddingVertical:18,opacity:autoScrollEnabled?1:0.45}}>
             <View style={styles.blurHeading}><Text style={styles.settingsMenuTitle}>{t("Time per passage")}</Text><Text style={styles.settingsMenuDescription}>{autoScrollSeconds} {t("seconds")}</Text></View>
-            <Slider accessibilityLabel={t("Time per passage")} accessibilityValue={{min:5,max:60,now:autoScrollSeconds,text:`${autoScrollSeconds} ${t("seconds")}`}} minimumValue={5} maximumValue={60} step={1} value={autoScrollSeconds} onValueChange={setAutoScrollSeconds} onSlidingComplete={value => {setAutoScrollSeconds(value); savePreference('auto-scroll-seconds', String(value));}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
-            <Text style={styles.settingsMenuDescription}>{t("Timed scrolling pauses while you interact. Read aloud advances after the voice finishes instead.")}</Text>
+            <Slider disabled={!autoScrollEnabled} accessibilityLabel={t("Time per passage")} accessibilityValue={{min:3,max:30,now:autoScrollSeconds,text:`${autoScrollSeconds} ${t("seconds")}`}} minimumValue={3} maximumValue={30} step={1} value={autoScrollSeconds} onValueChange={value => {if(value!==autoScrollSeconds){void Haptics.selectionAsync().catch(()=>{});setAutoScrollSeconds(value);savePreference('auto-scroll-seconds', String(value));}}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
+            <View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={styles.settingsMenuDescription}>3 s</Text><Text style={styles.settingsMenuDescription}>30 s</Text></View>
           </View>
         </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>

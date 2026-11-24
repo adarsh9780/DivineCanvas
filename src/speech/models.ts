@@ -2,12 +2,14 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { NativeModules } from 'react-native';
 import type { InferenceSession } from 'onnxruntime-react-native';
 import { ParadeeEngine, wav } from './paradee/adapter';
-import { isParadeeInstalled, installParadee } from './paradee/storage';
+import { isParadeeInstalled, installParadee, paradeeDirectory } from './paradee/storage';
 import { PARADEE_DOWNLOAD_BYTES } from './paradee/assets';
-import { downloadVoiceLab, packDir, removeVoiceLab, voiceLabBytes, voiceLabInstalled, type VoiceLabPack } from './voiceLab';
+import { downloadVoiceLab, packDir, removeVoiceLab, voiceLabAssets, voiceLabBytes, voiceLabInstalled, type VoiceLabPack } from './voiceLab';
 import type { GeneratedSpeech, SpeechEngine, SpeechEngineInfo, SpeechLanguage, SpeechRequest } from './engine';
 
 export type VoiceModel = 'paradee'|'kokoro'|'ninada';
+export const voiceSpeeds=[0.5,0.75,1,1.25,1.5,2] as const;
+export function normalizeVoiceSpeed(value:unknown):number {if(typeof value!=='number' || !Number.isFinite(value) || value<0.5 || value>2)return 1;return voiceSpeeds.reduce((best,speed)=>Math.abs(speed-value)<Math.abs(best-value)?speed:best,1 as number);}
 export type VoiceSelection = {model:VoiceModel;voiceId:string;rate:number;expressiveness:number};
 export type VoiceSelections = Record<SpeechLanguage,VoiceSelection>;
 export const defaultVoiceSelections:VoiceSelections={
@@ -25,13 +27,27 @@ export function parseVoiceSelections(raw?:string):VoiceSelections {
   return Object.fromEntries((['en','hi','sa'] as const).map(lang=>{
     const saved=data?.[lang];const model:VoiceModel=saved?.model && Object.hasOwn(modelVoices,saved.model) && modelVoices[saved.model][lang].length ? saved.model : 'paradee';
     const voices=modelVoices[model][lang];const voiceId=voices.some(v=>v.id===saved?.voiceId)?saved!.voiceId!:voices[0].id;
-    const rate=typeof saved?.rate==='number' && saved.rate>=0.7 && saved.rate<=1.3?saved.rate:1;
+    const rate=normalizeVoiceSpeed(saved?.rate);
     const expressiveness=typeof saved?.expressiveness==='number' && saved.expressiveness>=0 && saved.expressiveness<=1?saved.expressiveness:0.667;
     return [lang,{model,voiceId,rate,expressiveness}];
   })) as VoiceSelections;
 }
 export function modelInstalled(model:VoiceModel) {return model==='paradee'?isParadeeInstalled():voiceLabInstalled(model) && (model!=='kokoro'||isParadeeInstalled());}
 export function modelBytes(model:VoiceModel) {return model==='paradee'?PARADEE_DOWNLOAD_BYTES:voiceLabBytes(model)+(model==='kokoro'?PARADEE_DOWNLOAD_BYTES:0);}
+
+/** Bytes actually removed; Kokoro shares Paradee's pronunciation files. */
+export function modelStorageBytes(model:VoiceModel):number {
+  const dir=model==='paradee'?paradeeDirectory():packDir(model);
+  try {return dir.exists ? dir.list().reduce((sum,item)=>sum+(item instanceof File ? item.size : 0),0) : 0;}catch{return 0;}
+}
+/** Remaining transfer estimate; an invalid same-sized file may need re-downloading. */
+export function modelDownloadBytes(model:VoiceModel):number {
+  const remaining=(dir:Directory,assets:readonly {name:string;size:number}[])=>assets.reduce((n,a)=>{const f=new File(dir,a.name);return n+(f.exists && f.size===a.size?0:a.size);},0);
+  // Paradee's installer downloads the full pack if its verification marker is missing.
+  const paradee=isParadeeInstalled()?0:PARADEE_DOWNLOAD_BYTES;
+  return model==='paradee'?paradee:remaining(packDir(model),voiceLabAssets[model])+(model==='kokoro'?paradee:0);
+}
+
 const check=(signal?:AbortSignal)=>{if(signal?.aborted) throw new Error('Speech cancelled.');};
 async function output(samples:Float32Array):Promise<GeneratedSpeech> {
   const dir=new Directory(Paths.cache,'speech-output');dir.create({idempotent:true,intermediates:true});

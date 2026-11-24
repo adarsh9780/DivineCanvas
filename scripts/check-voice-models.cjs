@@ -10,9 +10,10 @@ class ParadeeEngine {async preparePhonemes(){return {phonemes:'ab',vocab:{a:1,b:
 const ort={Tensor,InferenceSession:{create:async uri=>({run:async inputs=>{calls.push({uri,inputs});return {waveform:{data:new Float32Array([0,0.5])}};},release:async()=>{}})}};
 const imports={'expo-file-system':{File,Directory,Paths:{cache:'/cache'}},'react-native':{NativeModules:{Onnxruntime:{install:()=>{global.OrtApi={};return true;}}}},'./paradee/adapter':{ParadeeEngine,wav:()=>new Uint8Array(48)},'./paradee/storage':{isParadeeInstalled:()=>true,installParadee:async()=>{}},'./paradee/assets':{PARADEE_DOWNLOAD_BYTES:100},'./voiceLab':{voiceLabInstalled:()=>true,voiceLabBytes:()=>200,packDir:x=>({uri:`/${x}`})},'onnxruntime-react-native':ort};
 const api={};new Function('require','exports',code)(name=>{if(!(name in imports))throw Error(name);return imports[name];},api);
+assert.equal(api.normalizeVoiceSpeed(0.8),0.75);assert.equal(api.normalizeVoiceSpeed(1.9),2);assert.equal(api.normalizeVoiceSpeed(3),1);
 const defaults=api.parseVoiceSelections();assert.equal(defaults.en.model,'paradee');assert.equal(defaults.sa.voiceId,'hf_alpha');
 const saved=api.parseVoiceSelections(JSON.stringify({en:{model:'kokoro',voiceId:'am_puck',rate:1.2},sa:{model:'ninada',voiceId:'female',rate:0.8,expressiveness:0.4},hi:{model:'ninada',voiceId:'female',rate:9}}));
-assert.equal(saved.en.voiceId,'am_puck');assert.equal(saved.en.rate,1.2);assert.equal(saved.sa.model,'ninada');assert.equal(saved.sa.expressiveness,0.4);assert.equal(saved.hi.model,'paradee');assert.equal(saved.hi.rate,1);
+assert.equal(saved.en.voiceId,'am_puck');assert.equal(saved.en.rate,1.25);assert.equal(saved.sa.model,'ninada');assert.equal(saved.sa.expressiveness,0.4);assert.equal(saved.hi.model,'paradee');assert.equal(saved.hi.rate,1);
 const expected=JSON.parse(fs.readFileSync('src/speech/voiceLabInputs.ts','utf8').match(/= (.*) as const/)[1]).sanskrit;
 assert.deepEqual(api.ninadaSanskritIds('धर्मक्षेत्रे कुरुक्षेत्रे समवेता युयुत्सवः।'),expected);
 assert.throws(()=>api.ninadaSanskritIds('☃'),/Unsupported/);

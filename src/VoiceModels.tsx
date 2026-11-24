@@ -1,16 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, Text, View } from 'react-native';
-import { MenuView } from '@expo/ui/community/menu';
+import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
+import { SegmentedControl } from '@expo/ui/community/segmented-control';
 import { useAudioPlayer } from 'expo-audio';
 import Slider from '@react-native-community/slider';
+import { SymbolView } from 'expo-symbols';
+import * as Haptics from 'expo-haptics';
 import { useAppLanguage } from './AppLanguage';
 import { configureReadingAudio } from './readingAudioSession';
 import type { Palette } from './readingAppearance';
 import type { GeneratedSpeech, SpeechLanguage } from './speech/engine';
-import { modelBytes, modelInstalled, modelVoices, type VoiceModel, type VoiceSelections } from './speech/models';
+import { modelDownloadBytes, modelInstalled, modelStorageBytes, modelVoices, voiceSpeeds, type VoiceModel, type VoiceSelections } from './speech/models';
+import { voiceLabInstalled } from './speech/voiceLab';
 
 const langs:SpeechLanguage[]=['en','hi','sa'];
 const models:VoiceModel[]=['paradee','kokoro','ninada'];
+const speeds=voiceSpeeds;
 const samples:Record<SpeechLanguage,string>={en:'Tell me Sanjaya, what did my sons do?',hi:'धर्मक्षेत्र में एकत्र हुए मेरे पुत्रों ने क्या किया',sa:'धर्मक्षेत्रे कुरुक्षेत्रे समवेता युयुत्सवः।'};
 const titles:Record<VoiceModel,string>={paradee:'Paradee 8M',kokoro:'Kokoro 82M',ninada:'Ninada'};
 const bundledSamples:Record<VoiceModel,Partial<Record<SpeechLanguage,number>>>={
@@ -18,43 +22,65 @@ const bundledSamples:Record<VoiceModel,Partial<Record<SpeechLanguage,number>>>={
   kokoro:{en:require('../assets/voice-samples/kokoro-en.mp3'),hi:require('../assets/voice-samples/kokoro-hi.mp3')},
   ninada:{sa:require('../assets/voice-samples/ninada-sa.mp3')},
 };
+const haptic=()=>{void Haptics.selectionAsync().catch(()=>{});};
+const mb=(n:number)=>(n/1000000).toFixed(1)+' MB';
+const closestSpeed=(value:number)=>speeds.reduce((best,rate,i)=>Math.abs(rate-value)<Math.abs(speeds[best]-value)?i:best,0);
 
-type Props={colors:Palette;selections:VoiceSelections;onChange:(v:VoiceSelections)=>void;onDownload:(m:VoiceModel)=>Promise<void>;onRemove:(m:VoiceModel)=>Promise<void>;onPreview:(m:VoiceModel,l:SpeechLanguage,text:string)=>Promise<GeneratedSpeech>;downloading:VoiceModel|null;progress:number|null;onCancel:()=>void;revision:number};
+type Props={colors:Palette;selections:VoiceSelections;onChange:(v:VoiceSelections)=>void;onDownload:(m:VoiceModel)=>Promise<boolean>;onRemove:(m:VoiceModel)=>Promise<void>;onPreview:(m:VoiceModel,l:SpeechLanguage,text:string)=>Promise<GeneratedSpeech>;downloading:VoiceModel|null;progress:number|null;onCancel:()=>void;revision:number};
 export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPreview,downloading,progress,onCancel,revision}:Props) {
   const {appLanguage}=useAppLanguage();const hi=appLanguage==='hi';
   const [busy,setBusy]=useState<string|null>(null);const [playing,setPlaying]=useState<string|null>(null);
+  const [pending,setPending]=useState<{model:VoiceModel;lang:SpeechLanguage}|null>(null);const [showDownloads,setShowDownloads]=useState(false);
   const player=useAudioPlayer(null);const alive=useRef(true);const current=useRef<GeneratedSpeech|null>(null);
   useEffect(()=>{alive.current=true;const listener=player.addListener('playbackStatusUpdate',event=>{if(event.didJustFinish)setPlaying(null);});return()=>{alive.current=false;listener.remove();player.pause();const file=current.current;if(file)setTimeout(()=>void file.dispose().catch(()=>{}),30000);};},[player]);
   const label=(lang:SpeechLanguage)=>lang==='en'?(hi?'अंग्रेज़ी':'English'):lang==='hi'?(hi?'हिन्दी':'Hindi'):(hi?'संस्कृत':'Sanskrit');
-  async function play(model:VoiceModel,lang:SpeechLanguage) {
-    const key=`${model}-${lang}`;if(playing===key){player.pause();setPlaying(null);return;}
-    player.pause();setPlaying(null);setBusy(key);
-    try {if(!modelInstalled(model)){const source=bundledSamples[model][lang];if(!source)throw new Error('Sample unavailable.');await configureReadingAudio(false);player.replace(source);player.play();setPlaying(key);return;}const file=await onPreview(model,lang,samples[lang]);if(!alive.current){await file.dispose();return;}const old=current.current;current.current=file;await configureReadingAudio(false);player.replace({uri:file.uri});player.play();setPlaying(key);if(old)setTimeout(()=>void old.dispose().catch(()=>{}),30000);}
-    catch(error){if(alive.current)Alert.alert(hi?'नमूना नहीं चल सका':'Could not play sample',error instanceof Error?error.message:(hi?'फिर प्रयास करें।':'Please try again.'));}
+  const detail={fontSize:14,lineHeight:20,color:colors.muted};const action={color:colors.accent,fontSize:15,fontWeight:'600' as const};
+  const stop=()=>{player.pause();setPlaying(null);};
+  async function play(model:VoiceModel,lang:SpeechLanguage,configured=false) {
+    const key=configured?`${lang}-current`:`${model}-${lang}`;if(playing===key){stop();return;}
+    stop();setBusy(key);
+    try {
+      if(!modelInstalled(model)){const source=bundledSamples[model][lang];if(!source)throw new Error('Sample unavailable.');await configureReadingAudio(false);player.replace(source);player.play();setPlaying(key);return;}
+      const file=await onPreview(model,lang,samples[lang]);if(!alive.current){await file.dispose();return;}
+      const old=current.current;current.current=file;await configureReadingAudio(false);player.replace({uri:file.uri});player.play();setPlaying(key);if(old)setTimeout(()=>void old.dispose().catch(()=>{}),30000);
+    } catch(error){if(alive.current)Alert.alert(hi?'नमूना नहीं चल सका':'Could not play sample',error instanceof Error?error.message:(hi?'फिर प्रयास करें।':'Please try again.'));}
     finally {if(alive.current)setBusy(null);}
   }
-  const heading={fontSize:17,fontWeight:'600' as const,color:colors.ink};
-  const detail={fontSize:14,lineHeight:21,color:colors.muted};
-  const action={color:colors.accent,fontSize:15,fontWeight:'600' as const};
-  return <View style={{gap:24,paddingVertical:24}}>
-    <View style={{gap:6}}><Text accessibilityRole="header" style={heading}>{hi?'आवाज़ मॉडल':'Voice models'}</Text><Text style={detail}>{hi?'डाउनलोड से पहले नमूने सुनें। अपनी चुनी हुई आवाज़ ऑफ़लाइन उपयोग करने के लिए मॉडल डाउनलोड करें।':'Listen to samples before downloading. Download a model to use your chosen voice and settings offline.'}</Text></View>
-    <View>{models.map(model=>{const installed=revision>=0 && modelInstalled(model);const supported=langs.filter(l=>modelVoices[model][l].length>0);return <View key={model} style={{paddingVertical:16,borderBottomWidth:1,borderColor:colors.line,gap:8}}>
-      <View style={{flexDirection:'row',alignItems:'center',gap:12}}><View style={{flex:1,gap:4}}><Text style={{fontSize:16,fontWeight:'600',color:colors.ink}}>{titles[model]}</Text><Text style={detail}>{supported.map(label).join(' · ')} · {(modelBytes(model)/1000000).toFixed(1)} MB {hi?'कुल':'total'}</Text><Text style={detail}>{installed?(hi?'डाउनलोड किया गया':'Downloaded'):(hi?'डाउनलोड नहीं किया गया':'Not downloaded')}</Text></View>
-        {downloading===model?<Pressable accessibilityRole="button" onPress={onCancel} style={{minHeight:44,justifyContent:'center'}}><Text style={action}>{hi?'रोकें':'Cancel'} {Math.round((progress??0)*100)}%</Text></Pressable>:<Pressable accessibilityRole="button" disabled={!!downloading || !!busy} onPress={()=>void(installed?onRemove(model):onDownload(model))} style={{minHeight:44,justifyContent:'center',opacity:downloading||busy?0.5:1}}><Text style={action}>{installed?(hi?'हटाएँ':'Remove'):(hi?'डाउनलोड':'Download')}</Text></Pressable>}
-      </View>
-      {model==='paradee' && <Text style={detail}>{hi?'संस्कृत में हिन्दी उच्चारण का उपयोग होता है।':'Sanskrit uses the Hindi pronunciation model.'}</Text>}
-      {model==='kokoro' && <Text style={detail}>{hi?'इस आकार में Paradee का उच्चारण संसाधन शामिल है।':'Total size includes Paradee pronunciation resources; already downloaded files are reused.'}</Text>}
-      <View style={{flexDirection:'row',flexWrap:'wrap',gap:8}}>{supported.map(lang=>{const key=`${model}-${lang}`;return <Pressable key={lang} accessibilityRole="button" accessibilityLabel={`${playing===key?'Stop':'Play'} ${titles[model]} ${label(lang)}`} disabled={!!busy || !!downloading} onPress={()=>void play(model,lang)} style={{minHeight:44,paddingHorizontal:12,borderRadius:10,backgroundColor:colors.white,justifyContent:'center',opacity:busy || downloading?0.5:1}}>{busy===key?<ActivityIndicator color={colors.accent}/>:<Text style={action}>{playing===key?'Ⅱ':'▶'} {label(lang)}</Text>}</Pressable>;})}</View>
-    </View>;})}</View>
-    <View style={{gap:6}}><Text accessibilityRole="header" style={heading}>{hi?'हर भाषा की आवाज़':'Voice for each language'}</Text><Text style={detail}>{hi?'पढ़ने की भाषा बदलने पर चुनी आवाज़ अपने आप उपयोग होगी।':'Your chosen voice is used automatically when you change reading language.'}</Text></View>
-    {langs.map(lang=>{const choice=selections[lang];const options=models.filter(model=>modelVoices[model][lang].length);const voices=modelVoices[choice.model][lang];return <View key={lang} style={{gap:10,paddingBottom:16,borderBottomWidth:1,borderColor:colors.line}}>
-      <Text accessibilityRole="header" style={{fontSize:16,fontWeight:'600',color:colors.ink}}>{label(lang)}</Text>
-      <MenuView title={hi?'मॉडल चुनें':'Choose model'} actions={options.map(model=>({id:model,title:titles[model],state:model===choice.model?'on':'off'}))} onPressAction={event=>{const model=event.nativeEvent.event as VoiceModel;if(!options.includes(model))return;onChange({...selections,[lang]:{...choice,model,voiceId:modelVoices[model][lang][0].id}});}}><View accessibilityRole="button" accessibilityLabel={`${label(lang)} ${hi?'मॉडल':'model'}: ${titles[choice.model]}`} style={{minHeight:48,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}}><Text style={{color:colors.ink,fontSize:15}}>{hi?'मॉडल':'Model'}</Text><Text style={action}>{titles[choice.model]}  ▾</Text></View></MenuView>
-      {!modelInstalled(choice.model) && <Text style={detail}>{hi?'उपयोग से पहले ऊपर मॉडल डाउनलोड करें।':'Download this model above before using it.'}</Text>}
-      <MenuView title={hi?'आवाज़ चुनें':'Choose voice'} actions={voices.map(voice=>({id:voice.id,title:hi?(voice.name==='Female'?'महिला':'पुरुष'):voice.name,state:voice.id===choice.voiceId?'on':'off'}))} onPressAction={event=>{if(voices.some(v=>v.id===event.nativeEvent.event))onChange({...selections,[lang]:{...choice,voiceId:event.nativeEvent.event}});}}><View accessibilityRole="button" accessibilityLabel={`${label(lang)} ${hi?'आवाज़':'voice'}`} style={{minHeight:48,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}}><Text style={{color:colors.ink,fontSize:15}}>{hi?'आवाज़':'Voice'}</Text><Text style={action}>{hi?(voices.find(v=>v.id===choice.voiceId)?.name==='Female'?'महिला':'पुरुष'):voices.find(v=>v.id===choice.voiceId)?.name}  ▾</Text></View></MenuView>
-      <View style={{gap:2}}><View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={{color:colors.ink,fontSize:15}}>{hi?'गति':'Speed'}</Text><Text style={detail}>{choice.rate.toFixed(1)}×</Text></View><Slider accessibilityLabel={`${label(lang)} ${hi?'गति':'speed'}`} minimumValue={0.7} maximumValue={1.3} step={0.1} value={choice.rate} onSlidingComplete={rate=>onChange({...selections,[lang]:{...choice,rate:Number(rate.toFixed(1))}})} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent}/></View>
-      {choice.model==='ninada' && <View style={{gap:2}}><View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={{color:colors.ink,fontSize:15}}>{hi?'आवाज़ में विविधता':'Voice variation'}</Text><Text style={detail}>{Math.round(choice.expressiveness*100)}%</Text></View><Text style={detail}>{hi?'उच्च मान से आवाज़ में अधिक विविधता आ सकती है।':'Higher values can add variation to the voice.'}</Text><Slider accessibilityLabel={`${label(lang)} ${hi?'आवाज़ में विविधता':'voice variation'}`} minimumValue={0} maximumValue={1} step={0.1} value={choice.expressiveness} onSlidingComplete={expressiveness=>onChange({...selections,[lang]:{...choice,expressiveness:Number(expressiveness.toFixed(1))}})} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent}/></View>}
-      {Platform.OS==='web' && <Text style={detail}>{hi?'यह सुविधा मोबाइल ऐप में उपलब्ध है।':'Available in the mobile app.'}</Text>}
+  async function selectModel(model:VoiceModel,lang:SpeechLanguage) {
+    if(downloading || busy)return;haptic();stop();
+    if(!modelInstalled(model)){setPending({model,lang});const ok=await onDownload(model);if(alive.current)setPending(null);if(!ok)return;}
+    const choice=selections[lang];if(choice.model!==model)onChange({...selections,[lang]:{...choice,model,voiceId:modelVoices[model][lang][0].id}});
+  }
+  function confirmRemove(model:VoiceModel) {
+    if(model==='paradee' && voiceLabInstalled('kokoro')){Alert.alert(hi?'Paradee आवश्यक है':'Paradee is required',hi?'Kokoro को Paradee की उच्चारण फ़ाइलें चाहिए। पहले Kokoro हटाएँ।':'Kokoro uses Paradee’s pronunciation files. Remove Kokoro first.');return;}
+    const affected=langs.filter(lang=>selections[lang].model===model).map(label).join(', ');
+    const size=mb(modelStorageBytes(model));
+    const shared=model==='kokoro'?(hi?' Paradee की साझा फ़ाइलें रहेंगी।':' Shared Paradee files will remain.') : '';
+    const warning=affected?(hi?` ${affected} के लिए इसे फिर डाउनलोड करना होगा।`:` ${affected} will need this model downloaded again.`):'';
+    Alert.alert(hi?'डाउनलोड हटाएँ?':'Remove download?',`${titles[model]} · ${size}${shared}${warning}`,[{text:hi?'रद्द करें':'Cancel',style:'cancel'},{text:hi?'हटाएँ':'Remove',style:'destructive',onPress:()=>{stop();void onRemove(model);}}]);
+  }
+  return <View style={{gap:20,paddingVertical:24}}>
+    <View style={{gap:5}}><Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'आवाज़ें':'Voices'}</Text><Text style={detail}>{hi?'हर भाषा के लिए मॉडल चुनें। डाउनलोड से पहले नमूना सुनें।':'Choose a model for each language. Listen before downloading.'}</Text></View>
+    {langs.map(lang=>{const choice=selections[lang];const options=models.filter(model=>modelVoices[model][lang].length);const voices=modelVoices[choice.model][lang];const available=revision>=0 && modelInstalled(choice.model);const speedIndex=closestSpeed(choice.rate);return <View key={lang} style={{gap:12,padding:16,borderRadius:14,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line}}>
+      <Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{label(lang)}</Text>
+      {options.map(model=>{const installed=modelInstalled(model),selected=choice.model===model,key=`${model}-${lang}`,isPending=pending?.model===model && pending.lang===lang;
+        return <View key={model} style={{flexDirection:'row',alignItems:'center',gap:8}}>
+          <Pressable accessibilityRole="radio" accessibilityState={{checked:selected,disabled:!!downloading || !!busy}} accessibilityLabel={`${titles[model]}, ${installed?(hi?'डाउनलोड किया गया':'downloaded'):(hi?'डाउनलोड':'download')+' '+mb(modelDownloadBytes(model))}`} disabled={!!downloading || !!busy} onPress={()=>void selectModel(model,lang)} style={{flex:1,minHeight:56,flexDirection:'row',alignItems:'center',gap:10}}>
+            <SymbolView name={{ios:selected?'checkmark.circle.fill':'circle',android:selected?'radio_button_checked':'radio_button_unchecked',web:selected?'radio_button_checked':'radio_button_unchecked'}} size={22} tintColor={selected?colors.accent:colors.muted}/>
+            <View style={{flex:1,gap:2}}><Text style={{fontSize:15,fontWeight:selected?'600':'400',color:colors.ink}}>{titles[model]}</Text><Text style={detail}>{installed?`${mb(modelStorageBytes(model))} · ${hi?'डाउनलोड किया गया':'Downloaded'}`:`↓ ${mb(modelDownloadBytes(model))}`}</Text></View>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={`${playing===key?'Stop':'Play'} ${label(lang)} sample with ${titles[model]}`} disabled={!!downloading || !!busy} onPress={()=>void play(model,lang)} style={{minWidth:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>{busy===key?<ActivityIndicator color={colors.accent}/>:<SymbolView name={{ios:playing===key?'stop.circle':'play.circle',android:playing===key?'stop_circle':'play_circle',web:playing===key?'stop_circle':'play_circle'}} size={25} tintColor={colors.accent}/>}</Pressable>
+          {isPending && downloading===model && <Pressable accessibilityRole="button" accessibilityLabel={hi?'डाउनलोड रद्द करें':'Cancel download'} onPress={onCancel}><Text style={action}>{Math.round((progress??0)*100)}% ×</Text></Pressable>}
+        </View>;})}
+      {choice.model==='paradee' && lang==='sa' && <Text style={detail}>{hi?'संस्कृत में हिन्दी उच्चारण का उपयोग होता है।':'Sanskrit uses Hindi pronunciation.'}</Text>}
+      <View style={{height:1,backgroundColor:colors.line}}/>
+      <View style={{gap:6,opacity:available?1:0.5}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'आवाज़':'Voice'}</Text><SegmentedControl accessibilityLabel={`${label(lang)} ${hi?'आवाज़':'voice'}`} values={voices.map(v=>hi?(v.name==='Female'?'महिला':'पुरुष'):v.name)} selectedIndex={Math.max(0,voices.findIndex(v=>v.id===choice.voiceId))} enabled={available && !downloading} appearance={colors.dark?'dark':'light'} onChange={event=>{const voice=voices[event.nativeEvent.selectedSegmentIndex];if(voice && voice.id!==choice.voiceId){haptic();stop();onChange({...selections,[lang]:{...choice,voiceId:voice.id}});}}}/></View>
+      <View style={{gap:3,opacity:available?1:0.5}}><View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'गति':'Speed'}</Text><Text style={detail}>{choice.rate}×</Text></View><Slider disabled={!available || !!downloading} accessibilityLabel={`${label(lang)} ${hi?'गति':'speed'}`} accessibilityValue={{min:0.5,max:2,now:choice.rate,text:`${choice.rate} ${hi?'गुना':'times'}`}} minimumValue={0} maximumValue={speeds.length-1} step={1} value={speedIndex} onValueChange={index=>{const rate=speeds[Math.round(index)];if(rate!==undefined && rate!==choice.rate){haptic();stop();onChange({...selections,[lang]:{...choice,rate}});}}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent}/><View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={detail}>0.5×</Text><Text style={detail}>2×</Text></View></View>
+      {choice.model==='ninada' && <View style={{gap:3,opacity:available?1:0.5}}><View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}><Text style={{fontSize:15,color:colors.ink}}>{hi?'आवाज़ में विविधता':'Voice variation'} · {Math.round(choice.expressiveness*100)}%</Text><Pressable accessibilityRole="button" disabled={!available || !!downloading} onPress={()=>{haptic();stop();onChange({...selections,[lang]:{...choice,expressiveness:0.667}});}} style={{minHeight:44,justifyContent:'center'}}><Text style={action}>{hi?'डिफ़ॉल्ट':'Default'}</Text></Pressable></View><Text style={detail}>{hi?'Ninada में आवाज़ की विविधता बदल सकते हैं।':'Ninada supports voice variation; higher values add variety.'}</Text><Slider disabled={!available || !!downloading} accessibilityLabel={`${label(lang)} ${hi?'आवाज़ में विविधता':'voice variation'}`} accessibilityValue={{min:0,max:100,now:Math.round(choice.expressiveness*100),text:`${Math.round(choice.expressiveness*100)}%`}} minimumValue={0} maximumValue={1} step={0.1} value={choice.expressiveness} onValueChange={value=>{const v=Number(value.toFixed(1));if(v!==choice.expressiveness){haptic();stop();onChange({...selections,[lang]:{...choice,expressiveness:v}});}}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent}/></View>}
+      <Pressable accessibilityRole="button" accessibilityLabel={`${playing===`${lang}-current`?'Stop':'Preview'} ${label(lang)} ${titles[choice.model]} with current settings`} accessibilityState={{disabled:!available || !!busy || !!downloading}} disabled={!available || !!busy || !!downloading} onPress={()=>void play(choice.model,lang,true)} style={{minHeight:44,alignSelf:'flex-start',justifyContent:'center',opacity:available?1:0.5}}><Text style={action}>{playing===`${lang}-current`?'■':'▶'} {hi?'वर्तमान सेटिंग सुनें':'Preview current settings'}</Text></Pressable>
     </View>;})}
+    <View style={{gap:8}}><Pressable accessibilityRole="button" accessibilityState={{expanded:showDownloads}} onPress={()=>setShowDownloads(v=>!v)} style={{minHeight:44,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}}><Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'डाउनलोड प्रबंधित करें':'Manage downloads'}</Text><Text style={action}>{showDownloads?'−':'+'}</Text></Pressable>
+      {showDownloads && models.map(model=>{const bytes=modelStorageBytes(model);return <View key={model} style={{minHeight:56,flexDirection:'row',alignItems:'center',gap:12,borderBottomWidth:1,borderColor:colors.line}}><View style={{flex:1}}><Text style={{fontSize:15,color:colors.ink}}>{titles[model]}</Text><Text style={detail}>{bytes?`${mb(bytes)} ${hi?'हटाई जा सकती है':'removable'}`:(hi?'डाउनलोड नहीं किया गया':'Not downloaded')}</Text></View>{bytes>0 && <Pressable accessibilityRole="button" accessibilityLabel={`${hi?'हटाएँ':'Remove'} ${titles[model]}`} disabled={!!downloading || !!busy} onPress={()=>confirmRemove(model)} style={{minHeight:44,justifyContent:'center'}}><Text style={action}>{hi?'हटाएँ':'Remove'}</Text></Pressable>}</View>;})}
+    </View>
   </View>;
 }

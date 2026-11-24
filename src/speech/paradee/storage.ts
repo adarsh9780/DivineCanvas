@@ -3,12 +3,12 @@ import type { SpeechDownloadProgress } from '../engine';
 import { PARADEE_ASSETS, PARADEE_DOWNLOAD_BYTES } from './assets';
 
 const folder = () => new Directory(Paths.document, 'speech-engines');
-const destination = () => new Directory(folder(), 'paradee-1.3');
+export const paradeeDirectory = () => new Directory(folder(), 'paradee-1.3');
 let installing = false;
 
 /** A voice is available only when all expected files passed verification. */
 export function isParadeeInstalled(): boolean {
-  const directory = destination();
+  const directory = paradeeDirectory();
   return directory.exists && new File(directory, 'verified.json').exists &&
     PARADEE_ASSETS.every(asset => new File(directory, asset.name).exists);
 }
@@ -38,7 +38,7 @@ export async function installParadee(options: {signal?: AbortSignal; onProgress?
     }
     if (options.signal?.aborted) throw new Error('Download cancelled.');
     await new File(staging, 'verified.json').write(JSON.stringify({version:'1.3', sourceRevision:'b569f5efb789af5ba643a44af348427242ceb784'}));
-    const final = destination();
+    const final = paradeeDirectory();
     if (final.exists) final.delete();
     await staging.move(final);
     moved = true;
@@ -50,11 +50,11 @@ export async function installParadee(options: {signal?: AbortSignal; onProgress?
 
 export function removeParadee(): void {
   if (installing) throw new Error('Wait for the voice download to finish.');
-  const directory = destination();
+  const directory = paradeeDirectory();
   if (directory.exists) directory.delete();
 }
 
 export function paradeeFile(name: typeof PARADEE_ASSETS[number]['name']): File {
   if (!isParadeeInstalled()) throw new Error('The voice has not been downloaded.');
-  return new File(destination(), name);
+  return new File(paradeeDirectory(), name);
 }
