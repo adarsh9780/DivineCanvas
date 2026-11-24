@@ -936,6 +936,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     finally { setDictionaryDownload(null); }
   }
   async function removeModel(model:VoiceModel) {
+    if(Object.values(voiceSelections).some(choice=>choice.model===model || (model==='paradee' && choice.model==='kokoro')))return;
     if(model==='paradee' && voiceLabInstalled('kokoro')) {Alert.alert(appLanguage==='hi'?'Kokoro के लिए Paradee आवश्यक है':'Paradee is needed by Kokoro',appLanguage==='hi'?'पहले Kokoro हटाएँ।':'Remove Kokoro first.');return;}
     try {stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);await engine.uninstall();setModelRevision(n=>n+1);}
     catch(error){Alert.alert(t("Could not remove voice"),error instanceof Error?error.message:t("Please try again."));}
