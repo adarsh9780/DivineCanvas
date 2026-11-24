@@ -1,3 +1,4 @@
+import { transferFraction } from './downloadProgress';
 import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import * as SQLite from 'expo-sqlite';
@@ -17,12 +18,12 @@ export async function downloadBook(id:string, onProgress:(value:number)=>void):P
   const staging=new File(directory,`${spec.name}.partial`); const target=new File(directory,spec.name);
   if (staging.exists) staging.delete();
   try {
-    const task=File.createDownloadTask(`${release}/${spec.name}`,staging,{onProgress:({bytesWritten})=>onProgress(Math.min(1,bytesWritten/spec.bytes))});
+    const task=File.createDownloadTask(`${release}/${spec.name}`,staging,{onProgress:({bytesWritten,totalBytes})=>onProgress(transferFraction(bytesWritten,totalBytes,spec.bytes))});
     const file=await task.downloadAsync();
     if (!file || file.size !== spec.bytes || await file.digest('SHA-256') !== spec.sha256) throw new Error('The download could not be verified. Please try again.');
     if (target.exists) target.delete();
     await file.move(target);
-  } finally { if (staging.exists) staging.delete(); }
+  } finally { const partial=new File(directory,`${spec.name}.partial`); if (partial.exists) partial.delete(); }
 }
 export async function openBookDatabase(id:string):Promise<SQLite.SQLiteDatabase> {
   const spec=bookDownloads[id];

@@ -25,12 +25,16 @@ class File {
     files.delete(this.uri); files.set(target.uri,content); this.uri=target.uri; moveFinished=true;
   }
   static createDownloadTask(_url,destination,{onProgress}) {
-    return {downloadAsync:async () => {files.set(destination.uri,{size:9,sha:'ok'}); onProgress({bytesWritten:9}); return destination;}};
+    return {downloadAsync:async () => {files.set(destination.uri,{size:9,sha:'ok'}); onProgress({bytesWritten:3,totalBytes:12}); onProgress({bytesWritten:9}); return destination;}};
   }
 }
+const progressApi={};
+const progressCode=require('typescript').transpileModule(require('node:fs').readFileSync('src/downloadProgress.ts','utf8'),{compilerOptions:{module:require('typescript').ModuleKind.CommonJS}}).outputText;
+new Function('exports',progressCode)(progressApi);
 const api={};
 new Function('require','exports',compiled)(id => {
   if (id==='expo-file-system') return {Directory,File,Paths:{document:{uri:'documents'}}};
+  if (id==='./downloadProgress') return progressApi;
   if (id==='react-native') return {Platform:{OS:'ios'}};
   throw Error(id);
 },api);
@@ -46,7 +50,7 @@ new Function('require','exports',compiled)(id => {
   const progress=[]; await api.downloadMusic(track,n => progress.push(n));
   assert.equal(moveFinished,true,'download must wait for the move');
   assert.equal(api.musicDownloaded(track),true,'cleanup must not remove the completed file');
-  assert.deepEqual(progress,[1]);
+  assert.deepEqual(progress,[0.25,1]);
   api.removeMusic(track); assert.equal(api.musicDownloaded(track),false);
   rejectMove=true;
   await assert.rejects(api.downloadMusic(track,() => {}),/Move failed/);

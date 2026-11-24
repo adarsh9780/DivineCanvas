@@ -1,3 +1,4 @@
+import { downloadProgressLabel, transferFraction } from './downloadProgress';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, ActivityIndicator, Alert, Animated, AppState, Easing, FlatList, Image, LayoutAnimation, Linking, NativeModules, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View, useWindowDimensions, type GestureResponderEvent, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -903,7 +904,11 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
       }
       if(controller.signal.aborted)return 'cancelled';
       setDownloadingModel(model);setVoiceDownload(0);stopReadAloud();await speechWork.current;const engine=await getSpeechEngine(model);
-      await engine.install({signal:controller.signal,onProgress:p=>setVoiceDownload(Math.min(1,p.completedBytes/(p.totalBytes ?? modelBytes(model))))});
+      const sharedBytes = model==='kokoro' && modelInstalled('paradee') ? modelBytes('paradee') : 0;
+      await engine.install({signal:controller.signal,onProgress:p=>{
+        const total = (p.totalBytes ?? modelBytes(model)) - sharedBytes;
+        setVoiceDownload(transferFraction(p.completedBytes-sharedBytes,total,total));
+      }});
       if(!controller.signal.aborted){setModelRevision(n=>n+1);return 'success';}
       return 'cancelled';
     } catch(error) {setPendingVoiceStart(null);if(!controller.signal.aborted && !quiet)Alert.alert(t("Voice download failed"),error instanceof Error?error.message:t("Please try again."));return controller.signal.aborted?'cancelled':'failed';}
@@ -1322,7 +1327,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'पठन ऑडियो कैश':'Narration cache'}</Text><Text style={styles.settingsMenuDescription}>{`${(speechCacheBytes/1000000).toFixed(1)} MB`}</Text></View><Pressable accessibilityRole="button" onPress={() => {try {clearSpeechCache(); const remaining=speechCacheSize(); setSpeechCacheBytes(remaining); if (remaining>0) Alert.alert(appLanguage==='hi'?'कैश साफ़ हो रहा है':'Clearing narration cache',appLanguage==='hi'?'उपयोग में मौजूद ऑडियो सुरक्षित रूप से हटाया जाएगा।':'Audio still in use will be cleared after playback releases it.');} catch {Alert.alert(appLanguage==='hi'?'कैश साफ़ नहीं हुआ':'Could not clear cache');}}}><Text style={styles.downloadCancel}>{appLanguage==='hi'?'साफ़ करें':'Clear'}</Text></Pressable></View>
           <Text style={styles.imageHelp}>{t("The dictionary can be downloaded when you double-tap an English word. Removing a resource does not remove your saved verses or notes.")}</Text>
         </ScrollView> : settingsPage === 'playback' ? <ScrollView {...settingsScrollProps('playback')} contentContainerStyle={styles.settingsList}>
-          <View style={styles.settingsListRow}>
+          <View style={[styles.settingsListRow,backgroundPlaybackAvailable && {borderBottomWidth:0}]}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Use the play button to pause or resume.")}</Text></View>
             <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
           </View>
@@ -1336,8 +1341,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
               savePreference('background-reading-audio', String(value));
             }} trackColor={{true: colors.accent}} />
           </View>}
-          {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onRemove={removeModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
-          {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Auto-scroll")}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'समय पूरा होने पर अगला अंश दिखाएँ। पढ़कर सुनाने पर आवाज़ पूरी होने के बाद आगे बढ़ेगा।':'Move to the next passage after a set time. Read-aloud advances when the voice finishes.'}</Text></View>
             <Switch accessibilityLabel={t("Auto-scroll")} value={autoScrollEnabled} onValueChange={value => {if (value) stopReadAloud(); setAutoScrollEnabled(value); savePreference('auto-scroll-enabled', String(value));}} trackColor={{true: colors.accent}} />
@@ -1347,6 +1350,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Slider disabled={!autoScrollEnabled} accessibilityLabel={t("Time per passage")} accessibilityValue={{min:3,max:30,now:autoScrollSeconds,text:`${autoScrollSeconds} ${t("seconds")}`}} minimumValue={3} maximumValue={30} step={1} value={autoScrollSeconds} onValueChange={value => {if(value!==autoScrollSeconds){void Haptics.selectionAsync().catch(()=>{});setAutoScrollSeconds(value);savePreference('auto-scroll-seconds', String(value));}}} minimumTrackTintColor={colors.accent} maximumTrackTintColor={colors.line} thumbTintColor={colors.accent} tapToSeek style={styles.blurSlider}/>
             <View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={styles.settingsMenuDescription}>3 s</Text><Text style={styles.settingsMenuDescription}>30 s</Text></View>
           </View>
+          <View style={{height:1,backgroundColor:colors.line}} />
+          {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onRemove={removeModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
+          {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
         </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
@@ -1372,7 +1378,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
               {removable && Platform.OS!=='web' ? <MenuView shouldOpenOnLongPress style={{flex:1}} title={track.title} actions={[{id:'remove',title:appLanguage==='hi'?'डाउनलोड हटाएँ':'Remove download',image:'trash',attributes:{destructive:true}}]} onPressAction={event => {if(event.nativeEvent.event==='remove') deleteMusic(track);}}>{trackContent}</MenuView> : trackContent}
               {installed && <Pressable accessibilityRole="button" accessibilityLabel={`${previewMusic===id ? (appLanguage==='hi'?'पूर्वावलोकन रोकें':'Stop preview') : (appLanguage==='hi'?'पूर्वावलोकन चलाएँ':'Play preview')} ${track.title}`} onPress={() => setPreviewMusic(previewMusic===id ? null : id)} style={{width:44,height:48,alignItems:'center',justifyContent:'center'}}><SymbolView name={{ios:previewMusic===id?'pause.circle':'play.circle',android:previewMusic===id?'pause_circle':'play_circle',web:previewMusic===id?'pause_circle':'play_circle'}} size={24} tintColor={colors.accent} accessible={false}/></Pressable>}
               {previewMusic===id && <MusicPreview track={track} onFinish={() => setPreviewMusic(null)} onClose={() => setPreviewState(current => current?.id===id && current.scope===previewScope ? null : current)}/>}
-              {!installed && (progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{Math.round(progress*100)}%</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>)}
+              {!installed && (progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{downloadProgressLabel(progress,appLanguage==='hi')}</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>)}
             </MusicReorderRow>;
           })}
           <Text style={[styles.imageHelp,{paddingVertical:16}]}>{appLanguage==='hi'?'गीत Creative Commons Attribution 4.0 के अंतर्गत हैं। विवरण क्रेडिट में देखें।':'Tracks are licensed under Creative Commons Attribution 4.0. See Credits for sources.'}</Text>
@@ -1588,7 +1594,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         setSelectedWord(null);
       }, 0);
     }}>{view === screen && <StatusBar animated hidden={view === 'read' && immersive} style={colors.dark ? "light" : "dark"} />}
-    {!(view === 'read' && immersive) && voiceDownload !== null && <View accessibilityRole="progressbar" accessibilityLabel={t("Downloading reading voice")} accessibilityValue={{min:0,max:100,now:Math.round(voiceDownload*100)}} style={styles.downloadBanner}><ActivityIndicator color={colors.accent}/><Text style={styles.downloadBannerText}>{t("Downloading voice ·")} {Math.round(voiceDownload*100)}%</Text><Pressable accessibilityRole="button" onPress={cancelVoiceDownload}><Text style={styles.downloadCancel}>{t("Cancel")}</Text></Pressable></View>}
+    {!(view === 'read' && immersive) && voiceDownload !== null && <View accessibilityRole="progressbar" accessibilityLabel={t("Downloading reading voice")} accessibilityValue={{min:0,max:100,now:Math.round(voiceDownload*100)}} style={styles.downloadBanner}><ActivityIndicator color={colors.accent}/><Text style={styles.downloadBannerText}>{downloadProgressLabel(voiceDownload,appLanguage==='hi')}</Text><Pressable accessibilityRole="button" onPress={cancelVoiceDownload}><Text style={styles.downloadCancel}>{t("Cancel")}</Text></Pressable></View>}
     {!(view === 'read' && immersive) && dictionaryDownload !== null && dictionaryWord === null && <View accessibilityRole="progressbar" accessibilityLabel={t("Downloading English dictionary")} accessibilityValue={{min:0,max:100,now:Math.round(dictionaryDownload*100)}} style={styles.downloadBanner}><ActivityIndicator color={colors.accent}/><Text style={styles.downloadBannerText}>{t("Downloading dictionary ·")} {Math.round(dictionaryDownload*100)}%</Text></View>}
     <>
     {view === 'read' ? <>{!immersive && <>
@@ -1636,7 +1642,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.title)} ${installed ? (appLanguage==='hi' ? 'खोलें' : 'open') : (appLanguage==='hi' ? 'डाउनलोड करें' : 'download')}`} onPress={() => openBook(item)} onLongPress={() => openBookInfo(item)} style={{flexDirection:'row',alignItems:'center',gap:18,flex:1}}>
               <View style={{width:76,height:114,borderRadius:5,overflow:'hidden'}}>
                 <Image source={item.cover} style={styles.bookCover} resizeMode="cover" blurRadius={installed ? 0 : 3} accessibilityIgnoresInvertColors accessible={false}/>
-                {downloading && <View accessibilityRole="progressbar" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'डाउनलोड हो रही है':'downloading'}`} accessibilityValue={{min:0,max:100,now:progress}} style={{position:'absolute',top:0,bottom:0,left:0,right:0,backgroundColor:'rgba(0,0,0,0.48)',alignItems:'center',justifyContent:'center'}}><Text style={{color:'#fff',fontSize:17,fontWeight:'700'}}>{progress}%</Text><View style={{width:48,height:3,backgroundColor:'rgba(255,255,255,0.4)',marginTop:8,borderRadius:2}}><View style={{width:`${progress}%`,height:3,backgroundColor:'#fff',borderRadius:2}}/></View></View>}
+                {downloading && <View accessibilityRole="progressbar" accessibilityLabel={`${t(item.title)} ${appLanguage==='hi'?'डाउनलोड हो रही है':'downloading'}`} accessibilityValue={{min:0,max:100,now:progress}} style={{position:'absolute',top:0,bottom:0,left:0,right:0,backgroundColor:'rgba(0,0,0,0.48)',alignItems:'center',justifyContent:'center'}}>{progress===0 || bookDownload.progress>=1 ? <ActivityIndicator color="#fff"/> : <Text style={{color:'#fff',fontSize:17,fontWeight:'700'}}>{downloadProgressLabel(bookDownload.progress,appLanguage==='hi')}</Text>}<View style={{width:48,height:3,backgroundColor:'rgba(255,255,255,0.4)',marginTop:8,borderRadius:2}}><View style={{width:`${progress}%`,height:3,backgroundColor:'#fff',borderRadius:2}}/></View></View>}
               </View>
               <View style={{flex:1}}><Text style={styles.bookTitle}>{t(item.title)}</Text><Text style={styles.bookDetail}>{!installed ? `${(bookDownloads[item.id].bytes/1000000).toFixed(1)} MB · ${item.languages.includes('hi') ? t("Hindi, English & Sanskrit") : t("English & Sanskrit")}` : last ? `${appLanguage==='hi'?'जारी रखें':'Continue'} · ${localChapter(last.chapterTitle)}` : `${item.chapters.length} ${appLanguage==='hi'?'अध्याय':'chapters'}`}</Text></View>
             </Pressable>

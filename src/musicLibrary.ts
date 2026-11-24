@@ -1,3 +1,4 @@
+import { transferFraction } from './downloadProgress';
 import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 
@@ -33,7 +34,7 @@ export async function downloadMusic(track:MusicTrack,onProgress:(value:number)=>
   try {
     directory.create({idempotent:true,intermediates:true});
     if (staging.exists) staging.delete();
-    const task=File.createDownloadTask(`${release}/${track.filename}`,staging,{onProgress:({bytesWritten}) => onProgress(Math.min(1,bytesWritten/track.bytes))});
+    const task=File.createDownloadTask(`${release}/${track.filename}`,staging,{onProgress:({bytesWritten,totalBytes}) => onProgress(transferFraction(bytesWritten,totalBytes,track.bytes))});
     const file=await task.downloadAsync();
     if (!file || file.size!==track.bytes || await file.digest('SHA-256')!==track.sha256) throw new Error('The downloaded music could not be verified. Please try again.');
     if (target.exists) target.delete();
