@@ -1327,10 +1327,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'पठन ऑडियो कैश':'Narration cache'}</Text><Text style={styles.settingsMenuDescription}>{`${(speechCacheBytes/1000000).toFixed(1)} MB`}</Text></View><Pressable accessibilityRole="button" onPress={() => {try {clearSpeechCache(); const remaining=speechCacheSize(); setSpeechCacheBytes(remaining); if (remaining>0) Alert.alert(appLanguage==='hi'?'कैश साफ़ हो रहा है':'Clearing narration cache',appLanguage==='hi'?'उपयोग में मौजूद ऑडियो सुरक्षित रूप से हटाया जाएगा।':'Audio still in use will be cleared after playback releases it.');} catch {Alert.alert(appLanguage==='hi'?'कैश साफ़ नहीं हुआ':'Could not clear cache');}}}><Text style={styles.downloadCancel}>{appLanguage==='hi'?'साफ़ करें':'Clear'}</Text></Pressable></View>
           <Text style={styles.imageHelp}>{t("The dictionary can be downloaded when you double-tap an English word. Removing a resource does not remove your saved verses or notes.")}</Text>
         </ScrollView> : settingsPage === 'playback' ? <ScrollView {...settingsScrollProps('playback')} contentContainerStyle={styles.settingsList}>
-          <View style={[styles.settingsListRow,backgroundPlaybackAvailable && {borderBottomWidth:0}]}>
-            <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Read aloud")}</Text><Text style={styles.settingsMenuDescription}>{t("Read each passage and move to the next when finished. Use the play button to pause or resume.")}</Text></View>
-            <Switch accessibilityLabel={t("Read aloud")} value={readAloud} onValueChange={toggleReadAloud} trackColor={{true: colors.accent}} />
-          </View>
           {backgroundPlaybackAvailable && <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}>
               <Text style={styles.settingsMenuTitle}>{t("Background read-aloud")}</Text>
