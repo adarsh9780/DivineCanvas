@@ -35,7 +35,7 @@ import { MusicReorderRow } from './MusicReorderRow';
 import { ChapterScrubber } from './ChapterScrubber';
 import { MusicPreview } from './MusicPreview';
 import { VoiceModels, VoiceModelStorage } from './VoiceModels';
-import { createVoiceModel, defaultVoiceSelections, modelBytes, modelDownloadBytes, modelInstalled, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
+import { createVoiceModel, defaultVoiceSelections, modelBytes, modelDownloadBytes, modelInstalled, modelStorageBytes, parseVoiceSelections, type VoiceModel, type VoiceSelections } from './speech/models';
 import type { SpeechEngine } from './speech/engine';
 import { configureReadingAudio, setReadingMusicVolume, shouldPlayReadingMusic, PassageAudioQueue } from './readingAudioSession';
 import { voiceLabInstalled } from './speech/voiceLab';
@@ -928,10 +928,20 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
     const size=`${(bytes/1e6).toFixed(1)} MB`;
     return appLanguage==='hi'?`${size} जगह खाली होगी`:`Frees ${size}`;
   }
-  function downloadedResourcesLink() {
-    return <Pressable accessibilityRole="link" onPress={()=>openSettingsPage('downloads')} style={{minHeight:44,justifyContent:'center',alignSelf:'flex-start'}}>
-      <Text style={styles.settingsCreditLink}>{t("Downloaded resources")} ›</Text>
-    </Pressable>;
+  function downloadedResourcesRow(grouped=true) {
+    const modelTotal = runtimeAvailable ? (['paradee','kokoro','ninada'] as const).reduce((sum,model)=>sum+modelStorageBytes(model),0) : 0;
+    const bookTotal = books.reduce((sum,book)=>sum+(installedBooks[book.id] ? bookDownloads[book.id]?.bytes ?? 0 : 0),0);
+    const musicTotal = MUSIC_TRACKS.reduce((sum,track)=>sum+(track.id!==DEFAULT_MUSIC_ID && downloadedMusic[track.id] ? track.bytes : 0),0);
+    const total = modelTotal + bookTotal + musicTotal + speechCacheBytes + (dictionaryInstalled ? DICTIONARY_DOWNLOAD_BYTES : 0);
+    const size = `${(total/1e6).toLocaleString(appLanguage,{maximumFractionDigits:1})} MB`;
+    return <View style={grouped?{marginTop:16}:undefined}>
+      {grouped && <Text accessibilityRole="header" style={styles.readingHeading}>{appLanguage==='hi'?'स्टोरेज':'Storage'}</Text>}
+      <Pressable accessibilityRole="button" accessibilityLabel={`${t("Downloaded resources")}, ${size}`} onPress={()=>openSettingsPage('downloads')} style={({pressed})=>[{minHeight:52,flexDirection:'row',alignItems:'center',gap:8},pressed && {opacity:0.65}]}>
+        <Text style={[styles.settingsMenuTitle,grouped && {flex:1}]}>{t("Downloaded resources")}</Text>
+        {grouped && <Text style={styles.settingsMenuDescription}>{size}</Text>}
+        <Text accessible={false} style={styles.settingsChevron}>›</Text>
+      </Pressable>
+    </View>;
   }
   function removeResourceButton(title:string,onPress:()=>void) {
     return <Pressable accessibilityRole="button" accessibilityLabel={`${t("Remove download")} · ${title}`} onPress={onPress} hitSlop={4} style={{width:44,minHeight:44,alignItems:'center',justifyContent:'center'}}>
@@ -1339,7 +1349,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
         </ScrollView> : settingsPage === 'dictionary' ? <ScrollView {...settingsScrollProps('dictionary')} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("English dictionary")}</Text><Text style={styles.settingsMenuDescription}>{dictionaryDownload !== null ? `${appLanguage === 'hi' ? 'डाउनलोड हो रहा है' : 'Downloading'} ${Math.round(dictionaryDownload*100)}%` : dictionaryInstalled ? t("Downloaded · about 10 MB") : t("Not downloaded · about 10 MB")}</Text></View>
-            {dictionaryInstalled ? downloadedResourcesLink() : dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Download English dictionary")} onPress={()=>void installDictionaryFromSettings()}><Text style={styles.downloadCancel}>{t("Download")}</Text></Pressable>}
+            {dictionaryInstalled ? downloadedResourcesRow(false) : dictionaryDownload === null && <Pressable accessibilityRole="button" accessibilityLabel={t("Download English dictionary")} onPress={()=>void installDictionaryFromSettings()}><Text style={styles.downloadCancel}>{t("Download")}</Text></Pressable>}
           </View>
           <Text style={styles.imageHelp}>{t("Double-tap an English word while reading to look it up. Hindi and Sanskrit dictionaries are not available yet.")}</Text>
         </ScrollView> : settingsPage === 'downloads'  ? <ScrollView {...settingsScrollProps('downloads')} contentContainerStyle={styles.settingsList}>
@@ -1384,9 +1394,9 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
             <View style={{flexDirection:'row',justifyContent:'space-between'}}><Text style={styles.settingsMenuDescription}>3 s</Text><Text style={styles.settingsMenuDescription}>30 s</Text></View>
           </View>
           <View style={{height:1,backgroundColor:colors.line}} />
+          {runtimeAvailable && downloadedResourcesRow()}
           {runtimeAvailable && <VoiceModels colors={colors} selections={voiceSelections} onChange={updateVoiceSelections} onDownload={downloadModel} onPreview={previewVoice} downloading={downloadingModel} progress={voiceDownload} onCancel={cancelVoiceDownload} revision={modelRevision} />}
           {!runtimeAvailable && <Text style={styles.imageHelp}>{t("Reading aloud requires a development build.")}</Text>}
-          {runtimeAvailable && downloadedResourcesLink()}
         </ScrollView> : settingsPage === 'music' ? <ScrollView {...settingsScrollProps('music')} scrollEnabled={!musicDragging} contentContainerStyle={styles.settingsList}>
           <View style={styles.settingsListRow}>
             <View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{t("Reading music")}</Text><Text style={styles.settingsMenuDescription}>{t("Play instrumental music while reading.")}</Text></View>
@@ -1398,6 +1408,7 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
 
           </View>
           <View style={styles.settingsListRow}><View style={styles.settingsMenuText}><Text style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत शफ़ल करें':'Shuffle music'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'चुने हुए गीतों का क्रम बदलें।':'Shuffle the order of selected tracks.'}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={appLanguage==='hi'?'चुने हुए गीत शफ़ल करें':'Shuffle selected tracks'} onPress={shuffleMusic} style={{minHeight:44,paddingHorizontal:12,justifyContent:'center'}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'शफ़ल':'Shuffle'}</Text></Pressable></View>
+          {downloadedResourcesRow()}
           <View style={{paddingTop:24,gap:4}}><Text accessibilityRole="header" style={styles.settingsMenuTitle}>{appLanguage==='hi'?'संगीत संग्रह':'Music library'}</Text><Text style={styles.settingsMenuDescription}>{appLanguage==='hi'?'गीत चुनें, सुनें या क्रम बदलने के लिए हैंडल खींचें।':'Select tracks to play, preview them, or drag the handle to reorder.'}</Text></View>
           {[...musicQueue,...musicOrder.filter(id => !downloadedMusic[id])].map(id => {
             const track=MUSIC_TRACKS.find(item => item.id===id); if (!track) return null;
@@ -1414,7 +1425,6 @@ export default function ReaderProvider({children}:{children:React.ReactNode}) {
               {!installed && (progress!==undefined ? <Text accessibilityRole="progressbar" accessibilityLabel={`${track.title} ${appLanguage==='hi'?'डाउनलोड हो रहा है':'downloading'}`} accessibilityValue={{min:0,max:100,now:Math.round(progress*100)}} style={{color:colors.muted}}>{downloadProgressLabel(progress,appLanguage==='hi')}</Text> : <Pressable accessibilityRole="button" accessibilityLabel={`${appLanguage==='hi'?'डाउनलोड करें':'Download'} ${track.title}, ${(track.bytes/1000000).toFixed(1)} MB`} onPress={() => void installMusic(track)} style={{minHeight:44,justifyContent:'center',paddingHorizontal:8}}><Text style={{color:colors.accent,fontWeight:'600'}}>{appLanguage==='hi'?'डाउनलोड':'Download'}</Text></Pressable>)}
             </MusicReorderRow>;
           })}
-          {downloadedResourcesLink()}
           <Text style={[styles.imageHelp,{paddingVertical:16}]}>{appLanguage==='hi'?'गीत Creative Commons Attribution 4.0 के अंतर्गत हैं। विवरण क्रेडिट में देखें।':'Tracks are licensed under Creative Commons Attribution 4.0. See Credits for sources.'}</Text>
         </ScrollView> : settingsPage === 'chapter-select' ? <View style={{flex:1,paddingHorizontal:24}}>
           <TextInput accessibilityLabel={appLanguage==='hi'?'अध्याय खोजें':'Search chapters'} value={chapterSearch} onChangeText={setChapterSearch} placeholder={appLanguage==='hi'?'अध्याय संख्या या नाम खोजें':'Search chapter number or title'} placeholderTextColor={colors.muted} style={{color:colors.ink,borderBottomWidth:1,borderColor:colors.line,paddingVertical:14,fontSize:16}} />
