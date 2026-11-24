@@ -30,8 +30,8 @@ const haptic=()=>{void Haptics.selectionAsync().catch(()=>{});};
 const mb=(n:number)=>(n/1000000).toFixed(1)+' MB';
 const formatRate=(n:number)=>Number.isInteger(n)?n.toFixed(1):String(n);
 
-type Props={colors:Palette;selections:VoiceSelections;onChange:(v:VoiceSelections)=>void;onDownload:(m:VoiceModel,quiet?:boolean)=>Promise<VoiceDownloadResult>;onRemove:(m:VoiceModel)=>Promise<void>;onPreview:(m:VoiceModel,l:SpeechLanguage,text:string,voiceId:string)=>Promise<GeneratedSpeech>;downloading:VoiceModel|null;progress:number|null;onCancel:()=>void;revision:number};
-export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPreview,downloading,progress,onCancel,revision}:Props) {
+type Props={colors:Palette;selections:VoiceSelections;onChange:(v:VoiceSelections)=>void;onDownload:(m:VoiceModel,quiet?:boolean)=>Promise<VoiceDownloadResult>;onPreview:(m:VoiceModel,l:SpeechLanguage,text:string,voiceId:string)=>Promise<GeneratedSpeech>;downloading:VoiceModel|null;progress:number|null;onCancel:()=>void;revision:number};
+export function VoiceModels({colors,selections,onChange,onDownload,onPreview,downloading,progress,onCancel,revision}:Props) {
   const {appLanguage}=useAppLanguage();const hi=appLanguage==='hi';
   const [busy,setBusy]=useState<string|null>(null);const [playing,setPlaying]=useState<string|null>(null);
   const [pending,setPending]=useState<{model:VoiceModel;lang:SpeechLanguage}|null>(null);const [failed,setFailed]=useState<Partial<Record<VoiceModel,boolean>>>({});const selectionInFlight=useRef(false);const network=Network.useNetworkState();const offline=networkOffline(network);
@@ -66,24 +66,6 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
     if(choice.model!==model)onChange({...selections,[lang]:{...choice,model,voiceId:voice.id}});
     await play(model,lang,true);
   }
-  const selectedLanguages = (model:VoiceModel) => langs.filter(lang=>selections[lang].model===model);
-  const removalBlocked = (model:VoiceModel) =>
-    selectedLanguages(model).length > 0 ||
-    (model==='paradee' && (voiceLabInstalled('kokoro') || selectedLanguages('kokoro').length > 0));
-  const storageBusy = !!busy || !!playing || !!downloading || !!pending;
-  function confirmRemove(model:VoiceModel) {
-    if(removalBlocked(model) || storageBusy || selectionInFlight.current)return;
-    const size=mb(modelStorageBytes(model));
-    const languages=langs.filter(lang=>modelVoices[model][lang].length).map(label).join(', ');
-    const impact=hi?`${languages} में इस मॉडल का उपयोग करने के लिए इसे फिर डाउनलोड करें। किसी भाषा की चुनी हुई आवाज़ नहीं बदलेगी।`:`To use this model for ${languages}, download it again. Your selected voices will stay the same.`;
-    const dependencies=model==='kokoro'
-      ? (hi?'Paradee की साझा उच्चारण फ़ाइलें रहेंगी।':'Paradee’s shared pronunciation files will stay installed.')
-      : (hi?'इस डाउनलोड पर कोई स्थापित मॉडल निर्भर नहीं है।':'No installed model depends on this download.');
-    Alert.alert(hi?'डाउनलोड हटाएँ?':'Remove download?',`${titles[model]} · ${hi?`${size} जगह खाली होगी`:`Frees ${size}`}\n\n${impact} ${dependencies}`,[
-      {text:hi?'रद्द करें':'Cancel',style:'cancel'},
-      {text:hi?'हटाएँ':'Remove',style:'destructive',onPress:()=>{if(!selectionInFlight.current)void onRemove(model);}},
-    ]);
-  }
   return <View style={{gap:20,paddingVertical:24}}>
     <View style={{gap:5}}><Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'आवाज़ें':'Voices'}</Text><Text style={detail}>{hi?'मॉडल चुनने पर उसका नमूना अपने आप बजेगा। डाउनलोड से पहले भी नमूना सुन सकते हैं।':'Selecting a model plays its sample automatically. You can also listen before downloading.'}</Text></View>
     {langs.map(lang=>{const choice=selections[lang];const options=models.filter(model=>modelVoices[model][lang].length);const voices=modelVoices[choice.model][lang];const available=revision>=0 && modelInstalled(choice.model);const previewKey=`${lang}-${choice.model}-current`;const loadingPreview=busy===previewKey;const playingPreview=playing===previewKey;const controlsDisabled=!available || !!downloading || !!pending || !!busy;const gender=(voices.find(v=>v.id===choice.voiceId)?.name ?? 'Female') as Gender;return <View key={lang} style={{gap:12,padding:16,borderRadius:14,backgroundColor:colors.white,borderWidth:1,borderColor:colors.line}}>
@@ -92,7 +74,7 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
       {options.map(model=>{const installed=modelInstalled(model),selected=choice.model===model,key=`${model}-${lang}`;const state=voiceDownloadState(installed,downloading===model || pending?.model===model,progress,!!failed[model],modelDownloadBytes(model));const blocked=!!downloading || !!pending || !!busy || (offline && state.kind!=='downloaded');const size=mb(state.kind==='notDownloaded'||state.kind==='failed'?state.bytes:modelStorageBytes(model));
         const subtitle=state.kind==='downloading'?downloadProgressLabel(state.progress,hi):state.kind==='downloaded'?`${size} · ${hi?'डाउनलोड किया गया':'Downloaded'}`:offline?(hi?'डाउनलोड के लिए इंटरनेट से जुड़ें':'Connect to download'):state.kind==='failed'?(hi?'डाउनलोड विफल · फिर प्रयास करें':'Download failed · Retry'):`${hi?'डाउनलोड नहीं किया गया':'Not downloaded'} · ${size}`;
         return <View key={model} style={{flexDirection:'row',alignItems:'center',gap:8}}>
-          <Pressable accessibilityRole="radio" accessibilityState={{checked:selected,disabled:blocked}} accessibilityLabel={`${titles[model]}, ${subtitle}${state.kind==='notDownloaded'&&!offline?'. Double tap to download and select.':''}`} disabled={blocked} onPress={()=>void selectModel(model,lang)} style={{flex:1,minHeight:56,flexDirection:'row',alignItems:'center',gap:10,paddingHorizontal:6,borderRadius:8,backgroundColor:selected?colors.paper:undefined}}>
+          <Pressable accessibilityRole="radio" accessibilityState={{checked:selected,disabled:blocked}} accessibilityLabel={`${titles[model]}, ${subtitle}${state.kind==='notDownloaded'&&!offline?'. Double tap to download and select.':''}`} disabled={blocked} onPress={()=>void selectModel(model,lang)} style={{flex:1,minHeight:56,flexDirection:'row',alignItems:'center',gap:10,paddingHorizontal:6}}>
             <SymbolView name={{ios:selected?'largecircle.fill.circle':'circle',android:selected?'radio_button_checked':'radio_button_unchecked',web:selected?'radio_button_checked':'radio_button_unchecked'}} size={22} tintColor={selected?colors.accent:colors.muted}/>
             <View style={{flex:1,gap:2}}><Text style={{fontSize:15,fontWeight:selected?'600':'400',color:installed?colors.ink:colors.muted}}>{titles[model]}</Text><Text style={detail}>{subtitle}</Text>{state.kind==='downloading' && <View accessibilityRole="progressbar" accessibilityValue={{min:0,max:100,now:Math.round(state.progress*100)}} style={{height:3,backgroundColor:colors.line,borderRadius:2,overflow:'hidden',marginTop:3}}><View style={{height:3,width:`${Math.round(state.progress*100)}%`,backgroundColor:colors.accent}}/></View>}</View>
           </Pressable>
@@ -135,8 +117,34 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
         </View>
       </Pressable>
     </View>;})}
-    <View style={{gap:8,borderTopWidth:1,borderColor:colors.line,paddingTop:16}}>
-      <Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'स्टोरेज':'Storage'}</Text>
+  </View>;
+}
+
+
+export function VoiceModelStorage({colors,selections,onRemove,storageBusy}:Pick<Props,'colors'|'selections'> & {onRemove:(model:VoiceModel)=>Promise<void>;storageBusy:boolean}) {
+  const {appLanguage}=useAppLanguage();
+  const hi=appLanguage==='hi';
+  const detail={fontSize:14,lineHeight:20,color:colors.muted};
+  const label=(lang:SpeechLanguage)=>lang==='en'?(hi?'अंग्रेज़ी':'English'):lang==='hi'?(hi?'हिन्दी':'Hindi'):(hi?'संस्कृत':'Sanskrit');
+  const selectedLanguages = (model:VoiceModel) => langs.filter(lang=>selections[lang].model===model);
+  const removalBlocked = (model:VoiceModel) =>
+    selectedLanguages(model).length > 0 ||
+    (model==='paradee' && (voiceLabInstalled('kokoro') || selectedLanguages('kokoro').length > 0));
+  function confirmRemove(model:VoiceModel) {
+    if(removalBlocked(model) || storageBusy)return;
+    const size=mb(modelStorageBytes(model));
+    const languages=langs.filter(lang=>modelVoices[model][lang].length).map(label).join(', ');
+    const impact=hi?`${languages} में इस मॉडल का उपयोग करने के लिए इसे फिर डाउनलोड करें। किसी भाषा की चुनी हुई आवाज़ नहीं बदलेगी।`:`To use this model for ${languages}, download it again. Your selected voices will stay the same.`;
+    const dependencies=model==='kokoro'
+      ? (hi?'Paradee की साझा उच्चारण फ़ाइलें रहेंगी।':'Paradee’s shared pronunciation files will stay installed.')
+      : (hi?'इस डाउनलोड पर कोई स्थापित मॉडल निर्भर नहीं है।':'No installed model depends on this download.');
+    Alert.alert(hi?'डाउनलोड हटाएँ?':'Remove download?',`${titles[model]} · ${hi?`${size} जगह खाली होगी`:`Frees ${size}`}\n\n${impact} ${dependencies}`,[
+      {text:hi?'रद्द करें':'Cancel',style:'cancel'},
+      {text:hi?'हटाएँ':'Remove',style:'destructive',onPress:()=>{void onRemove(model);}},
+    ]);
+  }
+  return <View style={{gap:8,borderTopWidth:1,borderColor:colors.line,paddingTop:16}}>
+      <Text accessibilityRole="header" style={{fontSize:17,fontWeight:'600',color:colors.ink}}>{hi?'आवाज़ मॉडल':'Voice models'}</Text>
       <Text style={detail}>{hi?'मॉडल सभी भाषाओं में साझा होते हैं। यहाँ हटाने से डाउनलोड सभी भाषाओं से हट जाता है।':'Models are shared across languages. Removing a download here removes it from every language.'}</Text>
       {models.filter(model=>modelStorageBytes(model)>0).map(model=>{
         const inUse=removalBlocked(model);
@@ -152,6 +160,5 @@ export function VoiceModels({colors,selections,onChange,onDownload,onRemove,onPr
           </Pressable>
         </View>;
       })}
-    </View>
-  </View>;
+    </View>;
 }
